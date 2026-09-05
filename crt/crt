@@ -985,7 +985,11 @@ def show(st):
     print(f"  {'GLASS':<10} {'on' if st['on'] else 'off'}")
     print(f"  {'CLOCK':<10} {'running' if st.get('animated') else 'stopped'}"
           f"{'   (Hyprland redraws the whole screen every frame)' if st.get('animated') else ''}")
-    for k in ("BARREL", "FADE", "TRACKING"):
+    # Every front-panel dial, taken from PANEL_DEFAULTS rather than listed
+    # again here — a hardcoded triple survived SCANLINE being added and left
+    # the fourth knob invisible to the command line while it worked fine on
+    # the bar.
+    for k in PANEL_DEFAULTS:
         v = st["panel"].get(k, PANEL_DEFAULTS[k])
         print(f"  {k:<10} {v:.2f}   {round(v * 100):>3d}%")
     print(f"  {'PHOSPHOR':<10} "

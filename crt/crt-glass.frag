@@ -62,9 +62,9 @@ const float BLOOM      = 0.35;  // centre phosphor wash        (TD bloom)
 const float VIGN       = 0.32;  // corner falloff              (TD vignette)
 const float SPECULAR   = 0.50;  // upper-left room-light catch on the glass
 const float TRACKING   = 0.60;  // rolling band strength       (TD tracking)
-const float TRACK_PERIOD = 16.0;// seconds between sweeps      (TD tracking_period)
-const float TRACK_SWEEP  = 7.0; // seconds one sweep takes     (TD tracking_sweep)
-const float BAND_H     = 160.0; // band height in px           (crt.rs BAND_H)
+const float TRACK_PERIOD = 19.325;// seconds between sweeps    (sweep + a 9s rest)
+const float TRACK_SWEEP  = 10.325; // seconds one sweep takes  (TD tracking_sweep: 7)
+const float BAND_H     = 264.0; // band height in px           (crt.rs BAND_H: 160)
 const float FLICKER    = 0.35;  // stepped burst depth         (TD flicker)
 const float GLARE      = 0.00;  // WHOLE-SCREEN glare — off by default now that the
                                 //   per-window warp shaders draw glare per tile
