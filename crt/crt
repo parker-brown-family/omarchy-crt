@@ -656,13 +656,19 @@ def tubes_watch():
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
                 name = line.decode("utf-8", "replace").split(">>", 1)[0]
-                # A reload re-reads the config and drops both runtime
-                # preconditions, so re-assert them there whether or not any
-                # surface actually moved.
+                # A reload is not a change, it is AMNESIA: Hyprland re-reads
+                # its config and drops everything set at runtime — the screen
+                # shader binding and both preconditions. "Did any rect move"
+                # is therefore the wrong question on this one event; the
+                # answer is usually no, the skip left the desktop flat, and
+                # the glass only came back when the mouse happened to cross
+                # monitors and flip the quiet flags. Forgetting `last` makes
+                # the next refresh restate the world unconditionally —
+                # shader, preconditions, and a phosphor re-read from the
+                # freshly staged theme, which is the other thing a theme
+                # switch changes without moving a single window.
                 if name == "configreloaded":
-                    st = load()
-                    preconditions(bool(st.get("animated")) and st["on"],
-                                  len(last) if isinstance(last, tuple) else 0)
+                    last = None
                 if name in WATCH_EVENTS:
                     refresh(name)
     finally:

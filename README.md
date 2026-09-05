@@ -5,6 +5,11 @@ on **any** theme, with four knobs on the bar.
 
 ![The standard Omarchy scene, behind the glass](docs/glass.png)
 
+Same desk, different theme — nothing about the glass was touched in
+between. The phosphor is the theme's own accent:
+
+![The same scene wearing a jade theme](docs/glass-jade.png)
+
 <!-- still wanted: the knob tray — open it on the staged scene and crop (docs/tray.png) -->
 
 A CRT filter is a **lens**, and a lens is not a palette. This one used to ship
