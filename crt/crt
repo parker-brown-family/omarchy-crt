@@ -6,6 +6,11 @@
     crt set SCAN 0.35 VIGN 0.2 service knobs take their raw shader names
     crt on / crt off           lift the glass off the screen
 
+    crt tubes                  give every visible surface its own tube, once
+    crt tubes watch            and keep them true as windows and popups come
+                               and go — without this the rects are a snapshot
+                               and the next menu gets bent by the window under it
+
     crt doctor                 what else on this box wants the screen shader
     crt try                    test it WITHOUT installing — hyprctl only, no
                                file written under ~/.config/hypr
@@ -58,6 +63,20 @@ TEMPLATE = PLUGIN / "crt-glass.frag"
 SHADER = STATE / "crt-glass.frag"
 PASSTHROUGH = STATE / "passthrough.frag"
 PREVIOUS = STATE / "previous-shader"
+WATCHER_PID = STATE / "watcher.pid"
+
+# Every Hyprland event that can move, create or destroy a surface. The layer
+# ones matter most and are the easiest to forget: a tray, a menu, a
+# notification and the lock screen are all layer surfaces that exist for a few
+# seconds, and a surface with no rect of its own is drawn through its
+# neighbour's map — bent, offset and seamed. That is not a rare edge; it is
+# every popup on the desktop.
+WATCH_EVENTS = (
+    "openwindow", "closewindow", "movewindow", "movewindowv2",
+    "changefloatingmode", "fullscreen", "workspace", "workspacev2",
+    "focusedmon", "monitoradded", "monitorremoved", "activewindowv2",
+    "openlayer", "closelayer", "configreloaded",
+)
 HYPR = HOME / ".config/hypr"
 CRT_LUA = HYPR / "crt.lua"
 HYPRLAND_LUA = HYPR / "hyprland.lua"
@@ -286,6 +305,16 @@ def render(st, path=None):
         if not re.search(r"^\s*#define TUBE_COUNT\s+\d+", block, re.M):
             print(f"warning: ignoring {TUBES} — it defines no TUBE_COUNT",
                   file=sys.stderr)
+        elif not watcher_alive() and not os.environ.get("CRT_TUBES_ANYWAY"):
+            # RECTS NOBODY IS KEEPING TRUE ARE WORSE THAN NO RECTS. Every
+            # surface that appears after they were written — a tray, a menu, a
+            # notification, the lock screen — has no rect of its own and is
+            # drawn through whichever window it happens to sit over, bent and
+            # seamed. Flat glass is merely less pretty; this is broken.
+            print("warning: no tube watcher is running, so the rects in "
+                  f"{TUBES} are a snapshot.\n"
+                  "         Rendering flat glass instead — `crt tubes watch` "
+                  "to keep them true.", file=sys.stderr)
         else:
             text = re.sub(
                 r"(// ---- TUBE DATA[^\n]*\n).*?(// ---- END TUBE DATA ----)",
@@ -400,6 +429,142 @@ def write_passthrough():
         "uniform sampler2D tex;\n"
         "out vec4 fragColor;\n"
         "void main() { fragColor = texture(tex, v_texcoord); }\n")
+
+
+# ------------------------------------------------------------------- tubes
+#
+# A tube is one surface's rectangle, and the shader bends each pixel through
+# whichever rect contains it. The invariant that makes that safe is that EVERY
+# visible surface claims its own rect — a region nobody claims falls through to
+# whatever rect is underneath and gets drawn through a neighbour's map.
+#
+# Which means a snapshot is not a weaker version of a registry, it is a broken
+# one. Layer surfaces come and go constantly: a tray, a menu, a notification,
+# the lock screen. None of them can appear in a list taken before they existed,
+# so each one gets bent by the window beneath it the moment it opens. The rects
+# must track the compositor or they must not be used at all, and there is no
+# guard that substitutes for watching.
+#
+# The geometry itself is not reimplemented here. td-tubes already does it —
+# rotation transforms, per-monitor scale, layer surfaces, the whole-monitor
+# budget, the disjointness invariant — and it carries a sourcing guard, so its
+# functions can be called for their values without running its command line.
+
+
+def td_tubes_block():
+    """The current rect block, or None when td-tubes is not installed."""
+    if not shutil.which("td-tubes"):
+        return None
+    r = subprocess.run(
+        ["bash", "-c",
+         'source "$(command -v td-tubes)"; emit_block "$(cap "$(tubes_json)")"'],
+        capture_output=True, text=True)
+    if r.returncode != 0 or "#define TUBE_COUNT" not in r.stdout:
+        return None
+    # Strip td-tubes' own markers; render() supplies its own.
+    body = re.sub(r"^// ---- TUBE DATA[^\n]*\n", "", r.stdout)
+    return re.sub(r"// ---- END TUBE DATA ----\n?$", "", body)
+
+
+def watcher_alive():
+    """Is something keeping the rects in step with the compositor right now?"""
+    try:
+        pid = int(WATCHER_PID.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def write_tubes(block):
+    STATE.mkdir(parents=True, exist_ok=True)
+    tmp = STATE / "tubes.glsl.new"
+    tmp.write_text(block)
+    tmp.replace(TUBES)
+
+
+def tubes_once():
+    block = td_tubes_block()
+    if block is None:
+        die("td-tubes is not installed — no rects to read (the glass stays flat)")
+    write_tubes(block)
+    st = load()
+    apply(st)
+    n = re.search(r"#define TUBE_COUNT\s+(\d+)", block)
+    print(f"{n.group(1) if n else '?'} tube(s)")
+    if not watcher_alive():
+        print("  no watcher is running, so these rects are a SNAPSHOT and the next")
+        print("  popup gets bent by the window under it. `crt tubes watch`.")
+
+
+def tubes_watch():
+    """Follow the compositor and keep the rects true until interrupted."""
+    if td_tubes_block() is None:
+        die("td-tubes is not installed — nothing to watch with")
+
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    rt = os.environ.get("XDG_RUNTIME_DIR")
+    if not sig or not rt:
+        die("no Hyprland session in this environment")
+    sock_path = Path(rt) / "hypr" / sig / ".socket2.sock"
+    if not sock_path.exists():
+        die(f"no event socket at {sock_path}")
+
+    import socket as _socket
+
+    STATE.mkdir(parents=True, exist_ok=True)
+    WATCHER_PID.write_text(str(os.getpid()) + "\n")
+
+    def flatten(*_):
+        # Leaving the last rects behind on the way out is the snapshot bug with
+        # extra steps, so the glass goes flat when the watch stops.
+        write_tubes("#define TUBE_COUNT 0\n")
+        try:
+            apply(load())
+        except SystemExit:
+            pass
+        WATCHER_PID.unlink(missing_ok=True)
+        raise SystemExit(0)
+
+    import signal
+    signal.signal(signal.SIGTERM, flatten)
+    signal.signal(signal.SIGINT, flatten)
+
+    last = None
+
+    def refresh(why):
+        nonlocal last
+        block = td_tubes_block()
+        if block is None or block == last:
+            return
+        last = block
+        write_tubes(block)
+        apply(load())
+        n = re.search(r"#define TUBE_COUNT\s+(\d+)", block)
+        print(f"crt: {n.group(1) if n else '?'} tube(s)  <- {why}", flush=True)
+
+    print(f"crt: watching {sock_path} (ctrl-c to stop)", flush=True)
+    refresh("start")
+
+    s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    s.connect(str(sock_path))
+    buf = b""
+    try:
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                name = line.decode("utf-8", "replace").split(">>", 1)[0]
+                if name in WATCH_EVENTS:
+                    refresh(name)
+    finally:
+        flatten()
 
 
 def live_shader():
@@ -719,6 +884,12 @@ def main(argv):
         return
     if cmd == "uninstall":
         uninstall()
+        return
+    if cmd == "tubes":
+        if rest and rest[0] == "watch":
+            tubes_watch()
+        else:
+            tubes_once()
         return
     if cmd == "doctor":
         raise SystemExit(doctor())

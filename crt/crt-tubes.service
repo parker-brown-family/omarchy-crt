@@ -1,0 +1,28 @@
+[Unit]
+# Keep every visible surface's rect in step with the compositor.
+#
+# This is not an optimisation, it is the invariant. The shader bends each pixel
+# through whichever rect contains it, so a surface with no rect of its own gets
+# drawn through its neighbour's map — bent, offset and seamed. Layer surfaces
+# are the ones that make a snapshot untenable: a tray, a menu, a notification
+# and the lock screen each exist for a few seconds and cannot appear in a list
+# taken before they opened.
+#
+# `crt render` refuses to splice rects while this is not running, so the worst
+# case without it is flat glass rather than a torn desktop.
+Description=Delight-O-Matic — keep the CRT's per-surface rects true
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionEnvironment=HYPRLAND_INSTANCE_SIGNATURE
+
+[Service]
+Type=simple
+# %h is the user's home; the plugin is cloned under ~/.config/omarchy/plugins.
+ExecStart=%h/.config/omarchy/plugins/brownfamilysports.crt/crt/crt tubes watch
+# The watch flattens the glass on the way out, so a stop or a crash leaves a
+# plain desktop rather than the last layout's rects bending whatever moved in.
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=graphical-session.target

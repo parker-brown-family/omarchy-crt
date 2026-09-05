@@ -429,6 +429,9 @@ const float TUBE_CURV[TUBE_COUNT] = float[TUBE_COUNT](
 );
 #endif
 TUBES
+# Rects are only spliced while something is keeping them true — see the next
+# section for why. This shell stands in for that watcher.
+echo $$ >"$XDG_STATE_HOME/omarchy/crt/watcher.pid"
 "$CRT" render >/dev/null 2>&1
 check "a real block is spliced in" \
   "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$SHADER")" "#define TUBE_COUNT 2"
@@ -445,6 +448,60 @@ printf 'const int junk = 1;\n' >"$TUBEFILE"
 check "so is a block that defines no count" \
   "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$SHADER")" "#define TUBE_COUNT 0"
 rm -f "$TUBEFILE"
+
+echo
+echo "rects nobody is keeping true are refused, not used"
+# ---------------------------------------------------------------------------
+# THE ONE THAT WAS SEEN ON A REAL DESKTOP, IN A PHOTOGRAPH.
+#
+# A snapshot is not a weaker registry, it is a broken one. The shader bends each
+# pixel through whichever rect contains it, so a surface with no rect of its own
+# is drawn through its NEIGHBOUR's map. Layer surfaces are what make that fatal:
+# the tray, a menu, a notification and the lock screen each exist for a few
+# seconds and cannot be in a list written before they opened. The tray came up
+# bent, offset and seamed over the window beneath it.
+#
+# So a valid block is still refused unless something is demonstrably keeping it
+# in step with the compositor. Flat glass is merely less pretty.
+# ---------------------------------------------------------------------------
+PIDFILE="$XDG_STATE_HOME/omarchy/crt/watcher.pid"
+cat >"$TUBEFILE" <<'TUBES'
+#define TUBE_COUNT 2
+#if TUBE_COUNT > 0
+const vec4 TUBE_RECT[TUBE_COUNT] = vec4[TUBE_COUNT](
+    vec4(0.0, 0.0, 960.0, 1080.0),
+    vec4(960.0, 0.0, 960.0, 1080.0)
+);
+const int  TUBE_MON[TUBE_COUNT]  = int[TUBE_COUNT](
+    0, 0
+);
+const float TUBE_CURV[TUBE_COUNT] = float[TUBE_COUNT](
+    1.0, 1.0
+);
+#endif
+TUBES
+
+rm -f "$PIDFILE"
+"$CRT" render >/dev/null 2>&1
+check "a perfectly valid block is refused with no watcher alive" \
+  "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$SHADER")" "#define TUBE_COUNT 0"
+
+echo 999999 >"$PIDFILE"          # a pid that is not running
+"$CRT" render >/dev/null 2>&1
+check "a pidfile for a dead process does not count as a watcher" \
+  "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$SHADER")" "#define TUBE_COUNT 0"
+
+echo $$ >"$PIDFILE"              # this shell IS running
+"$CRT" render >/dev/null 2>&1
+check "a live watcher lets the rects through" \
+  "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$SHADER")" "#define TUBE_COUNT 2"
+
+rm -f "$PIDFILE"
+CRT_TUBES_ANYWAY=1 "$CRT" render >/dev/null 2>&1
+check "and there is an override for someone who has read the reason" \
+  "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$SHADER")" "#define TUBE_COUNT 2"
+rm -f "$TUBEFILE"
+"$CRT" render >/dev/null 2>&1
 
 echo
 echo "the QML is at least syntactically a plugin"

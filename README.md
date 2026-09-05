@@ -117,14 +117,42 @@ Stopping the clock hands the setting back.
 | `crt/crt` | render, knobs, channels, install |
 | `test/run` | 68 assertions in a sandbox, with `hyprctl` and `systemctl` stubbed |
 
-## What this does not do yet
+## Tubes: one per surface, or none
 
-The **per-window warp** — the per-tile tubes that bow each window separately and
-stay click-correct — still lives in `omarchy-terminal-delight-theme`'s
-`install-curve.sh`, and Terminal Paint detects it as `crtAvailable`. This plugin
-owns the monitor pass, which is the whole-desktop glass; moving the tubes across
-is the next piece, and `crt render` already splices a tube block from
-`$XDG_STATE_HOME/omarchy/crt/tubes.glsl` when one is there.
+Each visible surface gets its own rect, and the shader bends every pixel through
+whichever rect contains it. That is only safe while **every** surface claims
+one — a region nobody claims falls through to whatever rect is underneath and
+gets drawn through its neighbour's map, bent and offset and seamed.
+
+Which is why there is a watcher and not a snapshot:
+
+```bash
+crt tubes watch
+```
+```bash
+systemctl --user enable --now crt-tubes.service
+```
+
+Layer surfaces are what make the distinction matter. A tray, a menu, a
+notification and the lock screen each exist for a few seconds, so none of them
+can appear in a list written before they opened — and each one comes up bent
+over whatever window it happens to cover. Watching turns that into an
+`openlayer` event and a rect.
+
+`crt render` therefore **refuses to splice rects while nothing is keeping them
+true** and renders flat glass instead, which is merely less pretty. The watcher
+also flattens on its way out, so stopping it leaves a plain desktop rather than
+the last layout's rects bending whatever moved in. `CRT_TUBES_ANYWAY=1`
+overrides, for someone who has read this paragraph and disagrees.
+
+The geometry is not reimplemented here. `td-tubes`, in
+`omarchy-terminal-delight-theme`, already does the hard part — rotation
+transforms, per-monitor scale, layer surfaces, a whole-monitor budget, the
+disjointness invariant — and it carries a sourcing guard, so this calls its
+functions for their values without running its command line. That makes the
+tubes, for now, the one part of this plugin that wants the theme installed;
+without it the glass is flat and says so. Moving that registry in here is the
+open piece — it is not a colour scheme and does not belong to a theme.
 
 The optics are a port of [terminal-delight](https://github.com/parker-brown-family/terminal-delight)'s
 own display stack, dial for dial.
