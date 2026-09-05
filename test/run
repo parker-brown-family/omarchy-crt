@@ -625,21 +625,30 @@ check "an empty fx file is ignored, and the clock is handed back" "$(animated)" 
 check "with damage tracking back to the still-glass tier" "$(cat "$DAMAGE_STATE")" "2"
 
 echo
-echo "IGNITION is a service knob that never latches the steady clock"
+echo "screen ignition is a toggle, alongside the glass, that never latches the steady clock"
+# ---------------------------------------------------------------------------
+# A first-class on/off switch like `crt on/off` for the glass — not a level.
+# Off renders IGNITION at 0 (byte-identical); on renders it full. Turning it on
+# must not start the steady clock (only an in-flight arc does), and doctor must
+# flag a toggle-on with no watcher to fire it.
 # ---------------------------------------------------------------------------
 rm -f "$FXFILE" "$XDG_STATE_HOME/omarchy/crt/watcher.pid"
 "$CRT" set TRACKING 0 FLICKER 0 JIGGLE 0 >/dev/null 2>&1
-"$CRT" set IGNITION 1 >/dev/null 2>&1
-check "crt set IGNITION stores it" \
-  "$(grep -c '"IGNITION"' "$XDG_STATE_HOME/omarchy/crt/knobs.json")" "1"
-check "the const reaches the shader" "$(constof "$SHADER" IGNITION)" "1.0"
-check "but turning it up does NOT start the clock (it is not a motion knob)" \
+check "ships off — IGNITION renders 0.00 with the toggle off" \
+  "$(constof "$SHADER" IGNITION)" "0.0"
+"$CRT" ignition on >/dev/null 2>&1
+check "crt ignition on stores the toggle" \
+  "$(grep -c '"ignition": true' "$XDG_STATE_HOME/omarchy/crt/knobs.json")" "1"
+check "and the IGNITION const renders full" "$(constof "$SHADER" IGNITION)" "1.0"
+check "but turning it on does NOT start the clock (only an arc does)" \
   "$(animated)" "0"
+check "live.json shows the toggle for the panel" "$(grep -c '"ignition": true' "$LIVE")" "1"
 "$CRT" doctor >/dev/null 2>&1
-check "doctor FIGHTs an IGNITION with no watcher to fire it" "$?" "1"
+check "doctor FIGHTs ignition-on with no watcher to fire it" "$?" "1"
 check "and names the missing watcher" \
   "$(grep -c 'no tube watcher is running' "$XDG_STATE_HOME/omarchy/crt/doctor.json")" "1"
-"$CRT" set IGNITION 0 >/dev/null 2>&1
+"$CRT" ignition off >/dev/null 2>&1
+check "crt ignition off renders the const back to 0" "$(constof "$SHADER" IGNITION)" "0.0"
 
 echo
 echo "the fx unit checks (offset re-baking, signature, eligibility)"

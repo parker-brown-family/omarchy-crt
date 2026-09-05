@@ -29,7 +29,7 @@ export XDG_STATE_HOME="$TMPSTATE"
 CRTSTATE="$TMPSTATE/omarchy/crt"
 mkdir -p "$CRTSTATE"
 cat >"$CRTSTATE/knobs.json" <<'JSON'
-{ "on": true, "panel": {}, "service": { "IGNITION": 1.0 },
+{ "on": true, "ignition": true, "panel": {}, "service": {},
   "passthrough": ["terminal-delight"], "quietUnfocused": true, "animated": false }
 JSON
 

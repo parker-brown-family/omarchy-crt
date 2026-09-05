@@ -79,12 +79,14 @@ keep = dict(sorted(many.items(), key=lambda kv: kv[1]["t0"])[-crt.FX_MAX:])
 ok(len(keep) == crt.FX_MAX and "a19" in keep and "a0" not in keep,
    f"the storm cap keeps the newest {crt.FX_MAX} and drops the oldest")
 
-# --- the knob is real, settable, and NOT a motion knob ---
+# --- ignition is a toggle, gating the effect; depth is the advanced override ---
 kk = crt.known_knobs(crt.template())
-ok("IGNITION" in kk, "IGNITION is a knob crt set can reach")
+ok("IGNITION" in kk, "IGNITION is a shader const the renderer drives")
 ok("IGNITION" not in crt.MOTION, "IGNITION is not a MOTION knob, so it never latches the clock")
-ok(crt.ignition_level({"service": {"IGNITION": 1.0}}) == 1.0 and crt.ignition_level({}) == 0.0,
-   "ignition_level reads the knob and defaults to 0")
+ok(crt.ignition_on({"ignition": True}) and not crt.ignition_on({}),
+   "ignition_on reads the toggle and defaults off")
+ok(crt.ignition_depth({}) == 1.0, "ignition_depth is full by default so the plain toggle just works")
+ok(crt.ignition_depth({"service": {"IGNITION": 0.5}}) == 0.5, "ignition_depth honours an advanced override")
 
 # --- the duration knob: shader and watch must read the SAME arc length ---
 ok("FX_S" in kk, "FX_S is a settable knob (crt set FX_S retimes the arc)")
