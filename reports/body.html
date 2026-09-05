@@ -1,0 +1,534 @@
+<!-- ═══════════════ ELI5 ═══════════════ -->
+<div class="sec xsec" data-open="false">
+  <div class="stitle xhdr" onclick="toggleXSec(this)"><span class="xtrig">&#x25BC;</span> ELI5 &#x2014; tl;dr</div>
+  <div class="xbody">
+  <div class="cal ci commentable" data-id="eli5" data-title="ELI5">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="ct">&#x1F4A1; Plain English</div>
+    When a window opens on the desktop, its glass tube fires up the way a Terminal Delight pane does: the phosphor floods in, collapses to a scan line, pinches to a star, and the window emerges from behind the flash. When a window closes, the same arc runs from its midpoint &#x2014; the screen closes to a line, the line dies to a star, and the vacated space shows through before the last light is gone. 300&nbsp;ms, one knob, off by default. Done looks like: two photographs of it happening on the live desktop, and a probe suite that proves the trigger mechanism before any of it is built.
+  </div>
+  <div class="cal cn commentable" data-id="eli5-mechanism" data-title="Mechanism in one breath">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="ct">The mechanism in one breath</div>
+    The watch already rebuilds and hot-swaps the screen shader on every window event, and Hyprland restarts a screen shader&#x2019;s <code>time</code> uniform at zero on every apply (verified in the v0.56.2 source, the exact build installed). So a swap <em>is</em> a trigger: bake the dying or newborn rect into the shader as constants, swap, and a one-shot animation plays from t=0. The effect itself never needs the window&#x2019;s pixels &#x2014; Terminal Delight&#x2019;s own ignition is emissive gradients over a dark ground, which a fragment shader reproduces from a rect and a clock. Full feasibility argument with source citations: <code>reports/2026-09-05-ignition-port-feasibility.html</code>.
+  </div>
+  </div>
+</div>
+
+<!-- ═══════════════ WHAT SHIPS ═══════════════ -->
+<div class="sec xsec" data-open="false">
+  <div class="stitle xhdr" onclick="toggleXSec(this)"><span class="xtrig">&#x25BC;</span> What ships</div>
+  <div class="xbody">
+  <div class="sgrid">
+    <div class="sc commentable" data-id="ships-effect" data-title="The effect">
+      <span class="hint-tip">&#x1F4AC; comment</span>
+      <div class="lbl">The effect</div>
+      Ignition on <code>openwindow</code>, shutdown on <code>closewindow</code>, for every window that wears a curved tube. Terminal Delight windows are exempt by construction &#x2014; they play their own per-pane ignition, and their tubes carry curvature 0, which is the gate.
+    </div>
+    <div class="sc commentable" data-id="ships-knob" data-title="The knob">
+      <span class="hint-tip">&#x1F4AC; comment</span>
+      <div class="lbl">The knob</div>
+      One service-panel dial, <b>IGNITION</b>, 0..1. Ships at <b>0.00</b> &#x2014; the template in git renders byte-identical to today, honouring the SHIPPED-AT-ZERO doctrine. Any value above zero enables both halves and scales the flash brightness; 1.0 is Terminal Delight&#x2019;s exact glow curve. <code>crt set IGNITION 1</code> works with no CLI changes, because service knobs resolve by constant name.
+    </div>
+    <div class="sc commentable" data-id="ships-probes" data-title="The probes">
+      <span class="hint-tip">&#x1F4AC; comment</span>
+      <div class="lbl">The probes</div>
+      Three live-desktop probes: <code>probe-clock-reset</code> (the falsifier &#x2014; built first, everything stops if it fails), <code>probe-fx-freeze</code> (holds the arc at any instant for a photograph, mirroring <code>TD_IGNITION_FREEZE</code>), and <code>probe-fx-latency</code> (the event-to-flash number that settles the one open taste question).
+    </div>
+  </div>
+  </div>
+</div>
+
+<!-- ═══════════════ THE ARC ═══════════════ -->
+<div class="sec xsec" data-open="false">
+  <div class="stitle xhdr" onclick="toggleXSec(this)"><span class="xtrig">&#x25BC;</span> The arc, ported dial for dial</div>
+  <div class="xbody">
+  <p style="margin-bottom:12px">Source of truth is <code>terminal-delight/app/src/crt.rs</code> &#x2014; the constants, the three movements, the easing, and the shutdown remap are ported as numbers, not as impressions. The Rust stays authoritative; a parity test pins the GLSL constants against this table.</p>
+  <div class="tw commentable" data-id="arc-table" data-title="Arc constants table">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <table>
+      <tr><th>crt.rs</th><th>Shader</th><th>Value</th><th>Meaning</th></tr>
+      <tr><td><code>IGNITION_MS</code></td><td><code>FX_S</code></td><td>300&nbsp;ms</td><td>the whole arc &#x2014; punctuation, not a cutscene; deliberately not a knob</td></tr>
+      <tr><td><code>BLOOM_END</code></td><td><code>FX_BLOOM_END</code></td><td>0.40</td><td>flood from both edges has met in the middle; shutdown enters here</td></tr>
+      <tr><td><code>COLLAPSE_END</code></td><td><code>FX_COLLAPSE_END</code></td><td>0.68</td><td>the lit screen has closed to a single scan line</td></tr>
+      <tr><td><code>ARM</code></td><td><code>FX_ARM</code></td><td>0.012</td><td>star arm thickness, per-axis fraction (the code&#x2019;s behaviour; its comment says short-axis &#x2014; we port the code)</td></tr>
+      <tr><td><code>ignition(t)</code> easing</td><td><code>fx_pattern</code></td><td>ease-out bloom, ease-in collapse, p&#xB2; pinch</td><td>identical polynomials, identical glow ramps 0.35&#x2192;0.8&#x2192;1.0&#x2192;0</td></tr>
+      <tr><td><code>ground</code></td><td><code>ground</code></td><td>1.0 until pinch, then linear to 0</td><td>the dark tube face; the reveal is under way before the star dies</td></tr>
+      <tr><td><code>shutdown(t)</code></td><td><code>FX_KIND == 1</code></td><td>re-enter at 0.40</td><td>one arc, two entry points &#x2014; a change to the easing moves both, same as the Rust</td></tr>
+    </table>
+  </div>
+  <pre class="commentable" data-id="arc-glsl" data-title="fx_pattern GLSL"><span class="hint-tip">&#x1F4AC; comment</span>// TD's ignition(t), crt.rs:415 — per pixel, at warped-local w.
+// Returns flash brightness (pre-IGNITION scale); ground = dark-face opacity.
+float fx_pattern(vec2 w, float t, out float ground) {
+    float f = 0.0;
+    ground  = 1.0;
+    if (t &lt; FX_BLOOM_END) {                    // Bloom: ease-OUT flood from both edges
+        float p   = t / FX_BLOOM_END;
+        float e   = 1.0 - (1.0 - p) * (1.0 - p);
+        float lit = 0.5 * e;
+        float g   = 0.35 + 0.45 * e;
+        if (w.y &lt; lit)            f = g * (1.0 - w.y / max(lit, 1e-4));
+        else if (w.y &gt; 1.0 - lit) f = g * (1.0 - (1.0 - w.y) / max(lit, 1e-4));
+    } else if (t &lt; FX_COLLAPSE_END) {          // Collapse: ease-IN to a scan line
+        float p  = (t - FX_BLOOM_END) / (FX_COLLAPSE_END - FX_BLOOM_END);
+        float e  = p * p;
+        float hh = 0.5 * (1.0 - e);
+        float g  = 0.8 + 0.2 * e;
+        float d  = abs(w.y - 0.5);
+        if (d &lt; hh) f = g * (1.0 - d / max(hh, 1e-4));
+    } else {                                   // Pinch: four-pointed star, ground opens
+        float p  = (t - FX_COLLAPSE_END) / (1.0 - FX_COLLAPSE_END);
+        float e  = p * p;
+        float wd = 0.5 * (1.0 - e);            // streak half-extent (width fraction)
+        float sp = 0.26 * (1.0 - e);           // spike half-length (height fraction)
+        float g  = 1.0 - e;                    // hot for the first half, dead at the end
+        ground   = 1.0 - p;                    // linear reveal underneath
+        float dx = abs(w.x - 0.5), dy = abs(w.y - 0.5);
+        float fh = (dy &lt; FX_ARM * 0.5 &amp;&amp; dx &lt; wd) ? g * (1.0 - dx / max(wd, 1e-4)) : 0.0;
+        float fv = (dx &lt; FX_ARM * 0.5 &amp;&amp; dy &lt; sp) ? g * (1.0 - dy / max(sp, 1e-4)) : 0.0;
+        f = max(fh, fv);
+    }
+    return f;
+}</pre>
+  <div class="cal cn commentable" data-id="arc-layering" data-title="Layering">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="ct">Layering, exactly as the terminal does it</div>
+    The flash composites after the base colour is sampled and before the scanline, tracking, vignette and grade stages &#x2014; TD&#x2019;s words: &#x201C;above the grid and below the glass&#x201D;. The scanlines and curvature in the result are not drawn by the effect; they are what the glass does to whatever it is shown. The flash stays white, as in TD &#x2014; the grade and phosphor stages tint it downstream.
+  </div>
+  </div>
+</div>
+
+<!-- ═══════════════ ARCHITECTURE ═══════════════ -->
+<div class="sec xsec" data-open="false">
+  <div class="stitle xhdr" onclick="toggleXSec(this)"><span class="xtrig">&#x25BC;</span> Architecture &#x2014; what changes where</div>
+  <div class="xbody">
+  <div class="tw commentable" data-id="arch-files" data-title="Files touched">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <table>
+      <tr><th>File</th><th>Repo</th><th>Change</th></tr>
+      <tr><td><code>crt/crt-glass.frag</code></td><td>omarchy-crt</td><td>FX DATA block (ships at 0), <code>fx_pattern</code>, the fx loop in <code>main()</code>, <code>const float IGNITION = 0.00</code> in the config block</td></tr>
+      <tr><td><code>crt/crt</code></td><td>omarchy-crt</td><td>snapshot returns block + rows, addr map, fx table, selectors loop with expiry deadline, fx splice in <code>render()</code>, clock forcing, preconditions, <code>publish()</code> fx count, doctor checks, <code>flatten()</code> clears fx</td></tr>
+      <tr><td><code>Panel.qml</code></td><td>omarchy-crt</td><td>one row in <code>serviceKnobs</code>: <code>{ key: "IGNITION", label: "IGNITION" }</code> &#x2014; knob count and arrow-key cursor follow automatically</td></tr>
+      <tr><td><code>test/</code></td><td>omarchy-crt</td><td>three probes + unit tests + the shipped-at-zero pin extended to FX</td></tr>
+      <tr><td><code>bin/td-tubes</code></td><td>theme (upstream)</td><td>one field: client tube objects gain <code>addr: .address</code> in the <code>tubes_json</code> jq &#x2014; additive, ignored by every existing consumer; then <code>bin/sync-tubes-geometry</code> re-runs</td></tr>
+    </table>
+  </div>
+  <pre class="commentable" data-id="arch-seq" data-title="Sequence diagram"><span class="hint-tip">&#x1F4AC; comment</span>closewindow&gt;&gt;3f2a…                        Hyprland socket2
+      │
+      ▼
+crt tubes watch
+  addr_rows[3f2a…]  ──►  the rect that just died (from the LAST snapshot)
+  fx["3f2a…"] = shutdown(rect, curv, t0 = now)
+  snapshot()         ──►  fresh TUBE block + rows (one bash call, both halves)
+  write tubes.glsl + fx.glsl      FX_START = −(elapsed + lead)
+  apply()
+      │
+      ▼
+render(): template + knobs + ANIMATED forced 1 + TUBE splice + FX splice
+      │   glslangValidator gate — a bad bake never reaches the compositor
+      ▼
+swap_in(): write the idle slot, point decoration:screen_shader at it
+      │        Hyprland compiles the new path
+      ▼        applyScreenShader → setInitialTime(now)   ◄── the clock rearms
+  time counts from 0 → the arc plays over the vacated rect
+      │
+  t0 + 0.35 s: selectors timeout → refresh("fx-expiry")
+      └── fx pruned → steady build (clock only if motion knobs ask) → swap</pre>
+  <div class="cal ci commentable" data-id="arch-why-swap" data-title="Why the swap is the trigger">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="ct">Why the swap is the trigger</div>
+    Hyprland v0.56.2, <code>src/render/OpenGL.cpp</code>: applying a screen shader with a <code>time</code> uniform records <code>setInitialTime(globalTimer)</code>, and every frame feeds the shader <code>globalTimer &#x2212; initialTime</code>. The two-slot swap always forces a fresh apply (Hyprland refuses to recompile a path already in use, which is why the slots alternate), so every swap is a clock reset. This is an implementation detail, not a documented contract &#x2014; which is why the falsifier probe is the first ticket and re-runs after any compositor upgrade.
+  </div>
+  </div>
+</div>
+
+<!-- ═══════════════ WATCH STATE MACHINE ═══════════════ -->
+<div class="sec xsec" data-open="false">
+  <div class="stitle xhdr" onclick="toggleXSec(this)"><span class="xtrig">&#x25BC;</span> The watch state machine</div>
+  <div class="xbody">
+  <pre class="commentable" data-id="watch-pseudo" data-title="Watch pseudocode"><span class="hint-tip">&#x1F4AC; comment</span>FX_S, FX_PAD, FX_LEAD, FX_MAX = 0.30, 0.05, 0.03, 8
+
+fx        = {}   # addr -&gt; (kind, mon, rect, curv, t0_monotonic)
+addr_rows = {}   # addr -&gt; row, from the LAST snapshot (the only place a
+                 #          closed window's rect still exists)
+
+def refresh(why, data=""):
+    st = load()
+    block, rows = td_tubes_snapshot(st)     # emit_block + capped json, one call
+    if block is None: return
+    enabled = ignition_level(st) &gt; 0.0 and rows_carry_addr(rows)
+
+    if enabled and why == "closewindow":
+        row = addr_rows.get(norm_addr(data))
+        if row and eligible(row, st):
+            fx[norm_addr(data)] = Fx(SHUTDOWN, row, now())
+    if enabled and why == "openwindow":
+        addr = norm_addr(data.split(",", 1)[0])
+        row  = index_by_addr(rows).get(addr)
+        if row and eligible(row, st):
+            fx[addr] = Fx(IGNITE, row, now())
+
+    drop entries older than FX_S + FX_PAD; keep newest FX_MAX
+    addr_rows = index_by_addr(rows)
+
+    key, sig = block_key(block), fx_sig(fx)
+    if key == last_key and sig == last_sig:
+        return                              # nothing worth a recompile
+    last_key, last_sig = key, sig
+    write_tubes(block)
+    write_fx(fx)                            # FX_START = −(now − t0 + FX_LEAD)
+    apply(st)
+
+# The blocking recv loop becomes a selectors loop so an expiry can fire
+# with no event arriving:
+#   timeout = min(t0) + FX_S + FX_PAD − now   (None when fx is empty)
+#   on timeout: refresh("fx-expiry")          — prunes, swaps steady back in</pre>
+  <div class="cal cw commentable" data-id="watch-sig" data-title="The signature rule">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="ct">The rule that prevents an infinite rebuild loop</div>
+    <code>fx_sig</code> hashes <code>(addr, kind, mon, rect, t0)</code> and <b>never</b> the baked <code>FX_START</code> offsets. Offsets are recomputed at every bake, so including them makes every bake differ from the last and the watch rebuilds forever. The invariant that makes offsets correct anyway: <code>FX_START</code> constants are relative to the live apply, and every actual swap recomputes them &#x2014; when no swap happens, the live constants stay right because the live clock kept running.
+  </div>
+  <div class="cal cn commentable" data-id="watch-eligible" data-title="Eligibility">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="ct">Who gets a flash</div>
+    <code>eligible(row)</code>: curvature above zero (flat surfaces and layers are not pretending to be CRTs &#x2014; TD&#x2019;s own rule; this also exempts Terminal Delight windows, which the geometry marks curv&nbsp;0 and which play their own per-pane ignition), class not in the passthrough list (those pixels return early in the shader and a flash there could not draw), and &#x2014; when <code>quietUnfocused</code> holds &#x2014; the window&#x2019;s monitor is the focused one, because a monitor that is not being rendered would freeze the flash mid-arc as a stranded artifact, exactly the reason <code>TUBE_QUIET</code> exists.
+  </div>
+  <div class="cal cn commentable" data-id="watch-identity" data-title="Identity by address">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="ct">Identity is the window address, never the rect</div>
+    Diffing rect lists misfires: closing one tiled window moves every sibling, and each moved rect would read as a death plus a birth &#x2014; the whole workspace would flash on every retile. The socket2 events carry the window address (<code>closewindow&gt;&gt;3f2a&#x2026;</code>), so the fx table is keyed by address and rects are looked up in the address map. That is what the one-line upstream change buys: <code>tubes_json</code> rows gain <code>addr</code>, and the transform/clip/cap pipeline stays the single authority on geometry. Addresses are normalised (strip <code>0x</code>, lowercase) &#x2014; hyprctl and socket2 disagree on the prefix. When rows carry no <code>addr</code> (geometry not yet re-synced), fx disables itself with a one-line warning instead of guessing.
+  </div>
+  </div>
+</div>
+
+<!-- ═══════════════ SHADER CHANGES ═══════════════ -->
+<div class="sec xsec" data-open="false">
+  <div class="stitle xhdr" onclick="toggleXSec(this)"><span class="xtrig">&#x25BC;</span> Shader changes in detail</div>
+  <div class="xbody">
+  <pre class="commentable" data-id="shader-fxdata" data-title="FX DATA block"><span class="hint-tip">&#x1F4AC; comment</span>// ---- FX DATA (managed by crt tubes watch — do not hand-edit) ----
+#define FX_COUNT 2
+#if FX_COUNT &gt; 0
+const vec4  FX_RECT[FX_COUNT]  = vec4[FX_COUNT](
+    vec4(1280.0, 41.6, 1280.0, 758.4),   // shutdown: the kitty that just closed
+    vec4(0.0, 41.6, 1280.0, 758.4));     // ignite: the btop that just opened
+const int   FX_MON[FX_COUNT]   = int[FX_COUNT](0, 0);
+const float FX_CURV[FX_COUNT]  = float[FX_COUNT](1.0, 1.0);
+const float FX_START[FX_COUNT] = float[FX_COUNT](-0.12, 0.0);  // ≤ 0: seconds
+const int   FX_KIND[FX_COUNT]  = int[FX_COUNT](1, 0);          // 0 ignite, 1 shutdown
+#endif
+// ---- END FX DATA ----</pre>
+  <p style="margin-bottom:12px">The template in git ships <code>FX_COUNT 0</code> and every branch compiles out &#x2014; the same SHIPPED-AT-ZERO discipline the TUBE block carries, pinned by the same test. The watch splices this block from <code>fx.glsl</code> exactly the way <code>tubes.glsl</code> is spliced today, with the same must-define-a-count guard, and additionally treats a count above zero as zero when no watcher is alive &#x2014; fx is runtime state that only a live watch can keep true.</p>
+  <pre class="commentable" data-id="shader-loop" data-title="main() fx loop"><span class="hint-tip">&#x1F4AC; comment</span>// Injected after `vec3 col` is assembled (crt-glass.frag:359) and before the
+// scanline block (:364), so lines, band, vignette and grade lay over the flash.
+#if FX_COUNT &gt; 0
+    for (int i = 0; i &lt; FX_COUNT; i++) {
+        if (FX_MON[i] != wl_output) continue;
+        vec2 fl = ((uvs * res) - FX_RECT[i].xy) / FX_RECT[i].zw;
+        if (fl.x &lt; 0.0 || fl.x &gt; 1.0 || fl.y &lt; 0.0 || fl.y &gt; 1.0) continue;
+        float ft = (time - FX_START[i]) / FX_S;
+        if (ft &lt; 0.0 || ft &gt;= 1.0) continue;         // over: folds to nothing
+        if (FX_KIND[i] == 1) ft = FX_BLOOM_END + ft * (1.0 - FX_BLOOM_END);
+        // The same warp a tube applies, so the flash bows with the glass —
+        // computed from FX data, never from the pixel's live tube: a dying
+        // rect's pixels may already belong to the sibling that reflowed in.
+        vec2  c  = fl - 0.5;
+        float r2 = dot(c, c);
+        vec2  w  = 0.5 + c * (1.0 + TUBE_K1 * FX_CURV[i] * r2
+                                  + TUBE_K2 * FX_CURV[i] * r2 * r2);
+        float ground;
+        float f  = fx_pattern(w, ft, ground);
+        // outside the warped face = the tube's dark rim, while the ground holds
+        if (w.x &lt; 0.0 || w.x &gt; 1.0 || w.y &lt; 0.0 || w.y &gt; 1.0) f = 0.0;
+        col = mix(col, vec3(0.0), ground);           // the unlit tube face
+        col += vec3(f * IGNITION);                   // the flash, white
+    }
+#endif</pre>
+  <div class="cal cw commentable" data-id="shader-clock" data-title="Clock forcing">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="ct">The clock is forced, never latched</div>
+    <code>render()</code> writes <code>ANIMATED 1</code> whenever the spliced FX count is above zero, regardless of the stored <code>animated</code> flag &#x2014; a flash needs a clock. But <b>IGNITION never joins the <code>MOTION</code> tuple</b>: turning the knob must not latch the steady-state clock on, or a transient nicety silently buys a permanent full-screen redraw. The clock exists exactly as long as an arc is in flight; the expiry swap takes it back out unless a motion knob holds it. <code>preconditions()</code> gets the same treatment: damage tracking follows <i>(motion or fx active)</i> or tube count, asserted before and after the swap as today, and re-asserted on <code>configreloaded</code>.
+  </div>
+  </div>
+</div>
+
+<!-- ═══════════════ INVARIANTS ═══════════════ -->
+<div class="sec xsec" data-open="false">
+  <div class="stitle xhdr" onclick="toggleXSec(this)"><span class="xtrig">&#x25BC;</span> Invariants that must hold</div>
+  <div class="xbody">
+  <ul class="olist">
+    <li class="commentable" data-id="inv-zero" data-title="Shipped at zero"><span class="hint-tip">&#x1F4AC; comment</span><b>Shipped at zero.</b> Git carries <code>FX_COUNT 0</code> and <code>IGNITION 0.00</code>; a clean install renders the exact pixels it renders today. <code>test/run</code> pins both, alongside the existing TUBE pin.</li>
+    <li class="commentable" data-id="inv-sig" data-title="Signature excludes offsets"><span class="hint-tip">&#x1F4AC; comment</span><b>The fx signature excludes baked offsets.</b> <code>FX_START</code> changes on every bake by construction; hashing it rebuilds forever. Hash <code>(addr, kind, mon, rect, t0)</code> only.</li>
+    <li class="commentable" data-id="inv-motion" data-title="IGNITION is not MOTION"><span class="hint-tip">&#x1F4AC; comment</span><b>IGNITION is not a motion knob.</b> It never raises the stored <code>animated</code> flag. The clock rides the fx count through <code>render()</code>, transiently.</li>
+    <li class="commentable" data-id="inv-selfwarp" data-title="Self-contained warp"><span class="hint-tip">&#x1F4AC; comment</span><b>The fx warp is self-contained.</b> Always computed from <code>FX_RECT</code>/<code>FX_CURV</code>, never reused from the pixel&#x2019;s live tube &#x2014; a dying rect&#x2019;s pixels may already belong to the sibling tube that reflowed into the space, and its <code>local</code> is the wrong frame.</li>
+    <li class="commentable" data-id="inv-ground" data-title="Ground is not scaled"><span class="hint-tip">&#x1F4AC; comment</span><b>The knob scales the flash, never the ground.</b> TD&#x2019;s test asserts the tube face starts fully opaque &#x2014; a half-transparent dark face would show the raw window through the flash, the one thing the effect exists to prevent. IGNITION dims the light; the darkness is all or nothing.</li>
+    <li class="commentable" data-id="inv-eligible" data-title="Eligibility gates"><span class="hint-tip">&#x1F4AC; comment</span><b>Flat, passthrough and unfocused-quiet surfaces never flash.</b> Curvature zero is TD&#x2019;s own gate and doubles as the no-double-ignition rule for Terminal Delight windows; passthrough pixels return before the fx loop could paint them; quiet monitors would freeze the arc mid-flight as a stranded artifact.</li>
+    <li class="commentable" data-id="inv-clockdep" data-title="Clock reset is load-bearing"><span class="hint-tip">&#x1F4AC; comment</span><b>The clock-reset behaviour is load-bearing and undocumented.</b> <code>probe-clock-reset</code> is built first and re-run on every Hyprland upgrade. If it ever fails, the contingency is epoch-baked starts (measure Hyprland&#x2019;s start time, bake absolute offsets) &#x2014; uglier, drift-prone, and only reached for if the clean mechanism dies.</li>
+    <li class="commentable" data-id="inv-flatten" data-title="Teardown clears fx"><span class="hint-tip">&#x1F4AC; comment</span><b>Every teardown clears fx.</b> <code>flatten()</code>, <code>uninstall</code>, and watch startup all write an empty FX block, so no stale flash can outlive the process that promised to finish it.</li>
+  </ul>
+  </div>
+</div>
+
+<!-- ═══════════════ TICKETS ═══════════════ -->
+<div class="sec xsec" data-open="false">
+  <div class="stitle xhdr" onclick="toggleXSec(this)"><span class="xtrig">&#x25BC;</span> Implementation tickets</div>
+  <div class="xbody">
+  <div class="cal cn" style="margin-bottom:14px"><div class="ct">Order is load-bearing</div>The falsifier runs before anything is built on top of it; the shader lands before the watch that feeds it, because the freeze probe reviews the shader with no watch running; the theme change lands before the watch ticket that consumes the field. One pull request in omarchy-crt carries FX-2 through FX-7; the theme field is its own one-line pull request.</div>
+  <div class="tbox">
+
+    <div class="trow expandable commentable" data-id="t-fx0" data-title="FX-0 probe-clock-reset" data-open="false">
+      <span class="hint-tip">&#x1F4AC; comment</span>
+      <div class="trow-hdr">
+        <button class="texp" onclick="toggleTicket(this,event)" title="Expand details">&#x25B6;</button>
+        <div class="tid">FX-0</div>
+        <div class="ttl">The falsifier: prove the shader clock restarts on every apply</div>
+        <span class="bdg bh">high</span>
+      </div>
+      <div class="trow-body">
+        <div class="tbfield"><div class="tblabel">Intent</div>Everything rests on one undocumented Hyprland behaviour. Photograph it before building on it.</div>
+        <div class="tbfield"><div class="tblabel">Files</div><div class="tbfiles">test/probe-clock-reset (new)</div></div>
+        <div class="tbfield"><div class="tblabel">Gherkin</div><pre style="margin:0">Given a probe shader that tints a corner square green while time &lt; 1.0 and red after
+And the probe remembers what decoration:screen_shader pointed at
+When the probe applies the shader, screenshots the square, waits 1.5 s, screenshots again
+And then RE-applies the same bytes under the alternate slot path and screenshots a third time
+Then the captures read green, red, green — the clock restarted on the second apply
+And the probe restores the original shader and prints PASS with the three sampled colours</pre></div>
+        <div class="tbfield"><div class="tblabel">Gotchas</div>Sample with <code>grim -g</code> over a fixed geometry and average the pixels &#x2014; a single pixel can land on a scanline. The two applies must use different paths (the slot trick), or Hyprland skips the recompile and the third capture lies. Leave the desktop exactly as found: this runs on the live session.</div>
+        <div class="tbfield"><div class="tblabel">Verification</div>Run twice back to back; both PASS. A FAIL stops the project dead and reroutes to the epoch-baking contingency &#x2014; that decision comes back here, it is not made downstream.</div>
+      </div>
+    </div>
+
+    <div class="trow expandable commentable" data-id="t-fx1" data-title="FX-1 theme addr field" data-open="false">
+      <span class="hint-tip">&#x1F4AC; comment</span>
+      <div class="trow-hdr">
+        <button class="texp" onclick="toggleTicket(this,event)" title="Expand details">&#x25B6;</button>
+        <div class="tid">FX-1</div>
+        <div class="ttl">Theme: tubes_json rows carry the window address</div>
+        <span class="bdg bh">high</span>
+      </div>
+      <div class="trow-body">
+        <div class="tbfield"><div class="tblabel">Intent</div>Give the plugin a stable identity per window so births and deaths are exact, without re-deriving one line of geometry.</div>
+        <div class="tbfield"><div class="tblabel">Files</div><div class="tbfiles">omarchy-terminal-delight-theme/bin/td-tubes &#xB7; then omarchy-crt/bin/sync-tubes-geometry re-run</div></div>
+        <div class="tbfield"><div class="tblabel">Gherkin</div><pre style="margin:0">Given the tubes_json jq builds client tube objects
+When the object gains addr: .address (layers gain none)
+Then every existing consumer — emit_block, cap, describe, the theme's own bake — is unchanged
+And the plugin's re-synced tubes-geometry emits rows the watch can index by address</pre></div>
+        <div class="tbfield"><div class="tblabel">Gotchas</div>Additive only &#x2014; do not touch the <code>// class</code> comment format; the plugin&#x2019;s passthrough regex captures to end-of-line and would swallow an appended address. The sync header records the upstream sha; commit theme first, sync second, or the header lies.</div>
+        <div class="tbfield"><div class="tblabel">Verification</div><code>source tubes-geometry; tubes_json | jq '.[0].addr'</code> yields an address on a live desktop; theme&#x2019;s own <code>td-tubes apply</code> output byte-identical before and after.</div>
+      </div>
+    </div>
+
+    <div class="trow expandable commentable" data-id="t-fx2" data-title="FX-2 shader fx block" data-open="false">
+      <span class="hint-tip">&#x1F4AC; comment</span>
+      <div class="trow-hdr">
+        <button class="texp" onclick="toggleTicket(this,event)" title="Expand details">&#x25B6;</button>
+        <div class="tid">FX-2</div>
+        <div class="ttl">Shader: FX DATA block, fx_pattern, the loop, the IGNITION constant</div>
+        <span class="bdg bh">high</span>
+      </div>
+      <div class="trow-body">
+        <div class="tbfield"><div class="tblabel">Intent</div>The whole visual, reviewable frozen before any trigger machinery exists.</div>
+        <div class="tbfield"><div class="tblabel">Files</div><div class="tbfiles">crt/crt-glass.frag &#xB7; test/probe-fx-freeze (new)</div></div>
+        <div class="tbfield"><div class="tblabel">Gherkin</div><pre style="margin:0">Given the template carries the FX DATA block at count 0 and IGNITION 0.00
+When probe-fx-freeze bakes a build with ANIMATED 0, const time = T, one synthetic
+     fx rect on the focused monitor, IGNITION 1.0
+Then the applied still frame shows the arc at T — bloom, collapse or star by choice —
+     bowed by the tube warp, under the scanlines, inside the dark face
+And bin/shoot captures it for photograph review, and the probe restores the live state</pre></div>
+        <div class="tbfield"><div class="tblabel">Gotchas</div>GLSL ES float literals: every constant through the existing <code>glsl()</code> discipline or a driver rejects bare ints in const arrays. The freeze probe overrides the <code>const float time</code> branch, not the uniform &#x2014; frozen means damage tracking stays untouched. Insertion is between the <code>col</code> assembly and the scanline block; the TUBE_PASS early-return above it is what makes passthrough windows physically unflashable &#x2014; do not move it.</div>
+        <div class="tbfield"><div class="tblabel">Verification</div>glslangValidator passes at count 0 and at a two-entry bake with a negative start; photographs of t=0.2 / 0.55 / 0.9 reviewed against TD&#x2019;s reference frames; shipped template byte-diff empty when the block is at zero.</div>
+      </div>
+    </div>
+
+    <div class="trow expandable commentable" data-id="t-fx3" data-title="FX-3 watch integration" data-open="false">
+      <span class="hint-tip">&#x1F4AC; comment</span>
+      <div class="trow-hdr">
+        <button class="texp" onclick="toggleTicket(this,event)" title="Expand details">&#x25B6;</button>
+        <div class="tid">FX-3</div>
+        <div class="ttl">Watch: snapshot with rows, address map, fx table, expiry loop</div>
+        <span class="bdg bh">high</span>
+      </div>
+      <div class="trow-body">
+        <div class="tbfield"><div class="tblabel">Intent</div>The state machine from the section above, exactly.</div>
+        <div class="tbfield"><div class="tblabel">Files</div><div class="tbfiles">crt/crt (td_tubes_snapshot, refresh, tubes_watch, write_fx, fx_sig)</div></div>
+        <div class="tbfield"><div class="tblabel">Gherkin</div><pre style="margin:0">Given the watch runs with IGNITION above zero and re-synced geometry
+When a curved window closes
+Then within one refresh the shader swap carries a shutdown entry at that window's
+     last rect with FX_START 0, and the arc plays once
+And a second window event 120 ms later re-bakes the in-flight entry at −0.15
+     (elapsed plus lead) so its arc continues instead of restarting
+And 350 ms after the last t0 the expiry fires and the steady shader returns</pre></div>
+        <div class="tbfield"><div class="tblabel">Gotchas</div>The recv loop becomes a <code>selectors</code> loop &#x2014; the expiry must fire with no event arriving. Event data addresses lack the <code>0x</code> prefix hyprctl uses; normalise both sides. <code>closewindow</code> looks up the <em>previous</em> snapshot&#x2019;s map &#x2014; the new one no longer knows the window. The triggering entry&#x2019;s offset is 0, not &#x2212;lead. Focus-follows-close fires <code>activewindowv2</code> immediately after <code>closewindow</code>; the signature pair makes the second refresh a no-op unless the quiet flags flipped, which is a legitimate swap and the offsets ride it.</div>
+        <div class="tbfield"><div class="tblabel">Verification</div>Unit tests on <code>fx_sig</code> stability, offset arithmetic, prune, and the drop-oldest cap at 8; a live close under <code>CRT_WATCH_DEBUG</code> logs entry, swap, expiry in order.</div>
+      </div>
+    </div>
+
+    <div class="trow expandable commentable" data-id="t-fx4" data-title="FX-4 render/apply plumbing" data-open="false">
+      <span class="hint-tip">&#x1F4AC; comment</span>
+      <div class="trow-hdr">
+        <button class="texp" onclick="toggleTicket(this,event)" title="Expand details">&#x25B6;</button>
+        <div class="tid">FX-4</div>
+        <div class="ttl">Render and apply: fx splice, forced clock, preconditions, live.json</div>
+        <span class="bdg bmd">medium</span>
+      </div>
+      <div class="trow-body">
+        <div class="tbfield"><div class="tblabel">Intent</div>The fx block flows through the same guarded splice, validation and publish path the tube block earned.</div>
+        <div class="tbfield"><div class="tblabel">Files</div><div class="tbfiles">crt/crt (render, apply, publish, preconditions call sites, flatten, uninstall)</div></div>
+        <div class="tbfield"><div class="tblabel">Gherkin</div><pre style="margin:0">Given fx.glsl holds a two-entry block and the watch is alive
+When render() runs
+Then the FX block is spliced under the same must-define-a-count guard as tubes,
+     ANIMATED is forced to 1, and glslangValidator gates the result
+And preconditions() sees the fx-active clock, before and after the swap
+And live.json reports the fx count beside tubes, and IGNITION among the consts
+But when no watcher is alive, a non-zero fx file renders as zero with a warning</pre></div>
+        <div class="tbfield"><div class="tblabel">Gotchas</div>The stored <code>animated</code> flag is untouched &#x2014; the forcing lives in the render, so the state file never lies about what the user chose. <code>flatten()</code> and <code>uninstall</code> write the empty FX block before their final apply, or a crash-recovery leaves a corpse mid-arc.</div>
+        <div class="tbfield"><div class="tblabel">Verification</div>Render with watcher dead: fx zeroed, warning printed. <code>crt off</code> mid-arc: passthrough shader applied, no error. live.json diff shows fx and IGNITION keys.</div>
+      </div>
+    </div>
+
+    <div class="trow expandable commentable" data-id="t-fx5" data-title="FX-5 knob and doctor" data-open="false">
+      <span class="hint-tip">&#x1F4AC; comment</span>
+      <div class="trow-hdr">
+        <button class="texp" onclick="toggleTicket(this,event)" title="Expand details">&#x25B6;</button>
+        <div class="tid">FX-5</div>
+        <div class="ttl">Panel knob, doctor checks, README</div>
+        <span class="bdg bmd">medium</span>
+      </div>
+      <div class="trow-body">
+        <div class="tbfield"><div class="tblabel">Intent</div>The feature is discoverable, diagnosable, and documented &#x2014; a control that cannot do anything is worse than no control.</div>
+        <div class="tbfield"><div class="tblabel">Files</div><div class="tbfiles">Panel.qml &#xB7; crt/crt (doctor) &#xB7; README.md</div></div>
+        <div class="tbfield"><div class="tblabel">Gherkin</div><pre style="margin:0">Given the service panel is open
+When the IGNITION knob turns above zero
+Then crt set IGNITION persists it as a service constant and the next window
+     event flashes — no restart, no relogin
+And doctor warns when IGNITION is above zero with no watcher alive,
+     and when the geometry predates the addr field</pre></div>
+        <div class="tbfield"><div class="tblabel">Gotchas</div>The knob must not join <code>MOTION</code> &#x2014; the whole point of the transient clock. The README&#x2019;s service-panel table gains one row and the SHIPPED-AT-ZERO paragraph gains one sentence; resist documenting internals the probes already narrate.</div>
+        <div class="tbfield"><div class="tblabel">Verification</div>Arrow keys reach the new knob (count derives from the array); <code>crt</code> lists IGNITION; both doctor warnings reproduce on demand.</div>
+      </div>
+    </div>
+
+    <div class="trow expandable commentable" data-id="t-fx6" data-title="FX-6 test suite" data-open="false">
+      <span class="hint-tip">&#x1F4AC; comment</span>
+      <div class="trow-hdr">
+        <button class="texp" onclick="toggleTicket(this,event)" title="Expand details">&#x25B6;</button>
+        <div class="tid">FX-6</div>
+        <div class="ttl">Tests: zero pins, emitter units, compile variants, arc parity</div>
+        <span class="bdg bmd">medium</span>
+      </div>
+      <div class="trow-body">
+        <div class="tbfield"><div class="tblabel">Intent</div>Everything deterministic is CI-checkable; only taste goes to photographs.</div>
+        <div class="tbfield"><div class="tblabel">Files</div><div class="tbfiles">test/run &#xB7; test/fx-unit (new)</div></div>
+        <div class="tbfield"><div class="tblabel">Gherkin</div><pre style="margin:0">Given the repository as committed
+When test/run executes
+Then the template pins FX_COUNT 0 and IGNITION 0.00
+And the fx emitter's golden output, offset math, prune and cap are asserted
+And a rendered two-entry variant passes glslangValidator
+And the FX_* constants in the template equal the crt.rs table from this spec</pre></div>
+        <div class="tbfield"><div class="tblabel">Gotchas</div>The parity test greps constants out of the template rather than executing GLSL &#x2014; shape is reviewed by photograph, numbers by grep, and neither pretends to be the other.</div>
+        <div class="tbfield"><div class="tblabel">Verification</div>Suite green in CI with no compositor present; the compile variant runs wherever glslangValidator exists and skips loudly where not.</div>
+      </div>
+    </div>
+
+    <div class="trow expandable commentable" data-id="t-fx7" data-title="FX-7 latency and photographs" data-open="false">
+      <span class="hint-tip">&#x1F4AC; comment</span>
+      <div class="trow-hdr">
+        <button class="texp" onclick="toggleTicket(this,event)" title="Expand details">&#x25B6;</button>
+        <div class="tid">FX-7</div>
+        <div class="ttl">Acceptance: the latency number and the two photographs</div>
+        <span class="bdg bh">high</span>
+      </div>
+      <div class="trow-body">
+        <div class="tbfield"><div class="tblabel">Intent</div>Renderer work is verified by photograph, and the one open taste question is settled by a measured number, not a guess.</div>
+        <div class="tbfield"><div class="tblabel">Files</div><div class="tbfiles">test/probe-fx-latency (new)</div></div>
+        <div class="tbfield"><div class="tblabel">Gherkin</div><pre style="margin:0">Given the watch runs with debug timestamps and IGNITION 1.0
+When probe-fx-latency spawns and closes a marked window ten times
+Then it prints the median event-to-swap milliseconds
+And FX_LEAD is set from that number
+And Parker photographs one shutdown and one ignition on the live desktop
+But if the ignition's raw pop before the dark face lands reads badly in the flesh,
+     the open half gains a state flag and ships dark until a window rule hides the pop</pre></div>
+        <div class="tbfield"><div class="tblabel">Gotchas</div>Measure on a busy layout, not an empty workspace &#x2014; the snapshot subprocess and hyprctl round-trips dominate and both scale with clients. This ticket owns the ship/hold decision on the open half; nothing upstream pre-decides it.</div>
+        <div class="tbfield"><div class="tblabel">Verification</div>The number and both photographs land in the pull request body; the arc timing in the frames matches the spec table.</div>
+      </div>
+    </div>
+
+  </div>
+  </div>
+</div>
+
+<!-- ═══════════════ NOT DONE ═══════════════ -->
+<div class="sec xsec" data-open="false">
+  <div class="stitle xhdr" onclick="toggleXSec(this)"><span class="xtrig">&#x25BC;</span> Deliberately not done</div>
+  <div class="xbody">
+  <div class="tw commentable" data-id="notdone-table" data-title="Rejected and deferred">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <table>
+      <tr><th>Path</th><th>Status</th><th>Why</th></tr>
+      <tr><td>Hyprland C++ plugin animating the compositor&#x2019;s close-snapshots</td><td>rejected</td><td>true content-collapse is not even what TD does &#x2014; its effect is emissive-only, so the shader port is full parity at a fraction of the surface; a compiled plugin buys ABI churn for nothing visible</td></tr>
+      <tr><td>Epoch-baked animation starts (absolute time, no reset reliance)</td><td>contingency only</td><td>drift-prone and needs Hyprland&#x2019;s start time; reached for only if the falsifier fails</td></tr>
+      <tr><td>Porting fx into the theme&#x2019;s own bash td-tubes</td><td>deferred</td><td>a state machine with timers in bash is a second implementation of everything above; the plugin owns the watch &#x2014; if the theme wants it later, that is its own spec</td></tr>
+      <tr><td>Workspace-switch &#x201C;channel change&#x201D; (every tube on the new workspace ignites)</td><td>deferred</td><td>possibly the killer feature, definitely a taste risk; it is one eligibility branch away once open/close has been lived with</td></tr>
+      <tr><td>Tracking-band phase continuity across swaps (bake a band offset the same way)</td><td>deferred polish</td><td>the band already restarts on every layout swap today; the fx machinery makes fixing it nearly free, but it is a separate observable change</td></tr>
+      <tr><td>Duration/easing knobs</td><td>never</td><td>TD calls 300 ms &#x201C;punctuation, not a cutscene&#x201D; and ships it as a constant; so do we</td></tr>
+      <tr><td>Skipping expiry swaps when motion already holds the clock (lazy prune)</td><td>deferred</td><td>saves one swap per burst at the cost of a second code path through the signature logic; measure first, optimise if the band jump ever bothers anyone</td></tr>
+    </table>
+  </div>
+  </div>
+</div>
+
+<!-- ═══════════════ RISKS ═══════════════ -->
+<div class="sec xsec" data-open="false">
+  <div class="stitle xhdr" onclick="toggleXSec(this)"><span class="xtrig">&#x25BC;</span> Risks, each with its disproof</div>
+  <div class="xbody">
+  <div class="cal cw commentable" data-id="risk-reset" data-title="Risk: clock reset">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="ct">The clock does not actually reset on apply</div>
+    Source-read, not yet screen-observed. <b>Disproof:</b> FX-0&#x2019;s three captures. If red never returns to green on the re-apply, the finding falls, this spec pauses, and the epoch contingency gets its own review.
+  </div>
+  <div class="cal cw commentable" data-id="risk-latency" data-title="Risk: latency">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="ct">Event-to-flash latency reads as lag</div>
+    Estimated one to three frames; the shutdown half is naturally forgiving (it plays over vacated space) and the open half is the one at risk. <b>Disproof:</b> FX-7&#x2019;s median number plus the photographs. The open half ships or holds on that evidence, decided in that ticket.
+  </div>
+  <div class="cal cw commentable" data-id="risk-stranded" data-title="Risk: stranded frames">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="ct">A frozen flash strands on an idle surface</div>
+    Monitors that stop rendering freeze time-driven effects &#x2014; the documented reason quiet flags exist. Mitigated by the eligibility gate (no fx off the focused monitor) and by the expiry swap wiping the screen at arc-end regardless. <b>Disproof:</b> close a window, immediately switch workspace; the expiry lands within 350 ms and nothing persists.
+  </div>
+  <div class="cal cw commentable" data-id="risk-storm" data-title="Risk: event storms">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="ct">Retile storms multiply swaps</div>
+    Every layout change already costs a rebuild-and-swap today; fx adds at most one expiry swap per burst, and the signature pair suppresses everything else. <b>Disproof:</b> <code>CRT_WATCH_DEBUG</code> swap counts over a close-heavy minute, before and after the feature, differ by the expiry swaps alone.
+  </div>
+  <div class="cal cw commentable" data-id="risk-upgrade" data-title="Risk: compositor upgrades">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="ct">A Hyprland upgrade moves the reset semantics</div>
+    It is an implementation detail upstream is free to change. Standing mitigation: FX-0 is cheap enough to re-run after every compositor upgrade, and doctor&#x2019;s warning set makes a silent regression loud at the first symptom (a flash that never plays, with the knob up and the watch alive).
+  </div>
+  </div>
+</div>
+
+<!-- ═══════════════ OPEN QUESTIONS ═══════════════ -->
+<div class="sec xsec" data-open="false">
+  <div class="stitle xhdr" onclick="toggleXSec(this)"><span class="xtrig">&#x25BC;</span> Open questions</div>
+  <div class="xbody">
+  <div class="qbox commentable" data-id="q1" data-title="Q1 flash colour">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="qnum">Q1 &#x2014; Does the flash stay white, or take the theme&#x2019;s phosphor?</div>
+    <div class="qtxt">TD&#x2019;s flash is white and the grade tints it downstream; the plugin retints phosphor per theme everywhere else.</div>
+    <div class="qctx">Recommendation: white, exactly as TD &#x2014; the tracking band is phosphor-coloured because it is a signal artifact; the ignition flash is the beam itself. Revisit only if the photographs disagree.</div>
+  </div>
+  <div class="qbox commentable" data-id="q2" data-title="Q2 open half">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="qnum">Q2 &#x2014; Does ignition-on-open ship in the first release?</div>
+    <div class="qtxt">Both halves cost the same to build; only the open half risks a visible raw pop before the dark face lands.</div>
+    <div class="qctx">Recommendation: build both behind the one knob and let FX-7&#x2019;s latency number and photographs decide &#x2014; a pre-emptive scope cut would be deciding on a guess we are about to replace with a measurement.</div>
+  </div>
+  <div class="qbox commentable" data-id="q3" data-title="Q3 default">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="qnum">Q3 &#x2014; Does IGNITION ever default on?</div>
+    <div class="qtxt">Shipping at zero is doctrine for tube state; a knob default is a softer question &#x2014; FLICKER ships at 0.35.</div>
+    <div class="qctx">Recommendation: 0.00 for the release that introduces it. After a few weeks of living with it, defaulting to 1.0 is a one-line change with its own tiny discussion.</div>
+  </div>
+  </div>
+</div>

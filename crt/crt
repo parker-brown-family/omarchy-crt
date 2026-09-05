@@ -968,6 +968,25 @@ def apply(st):
     n2 = re.search(r"#define TUBE_COUNT\s+(\d+)", out.read_text())
     preconditions(bool(st.get("animated")) and st["on"],
                   int(n2.group(1)) if (n2 and st["on"]) else 0)
+    # A banner the race above already latched does not clear itself: nothing
+    # re-evaluates it, and the restated tier only stops the NEXT compile from
+    # complaining. `hyprctl reload` was long believed the only way to take it
+    # down; measured 2026-09-05, `hyprctl seterror disable` clears it
+    # instantly, with none of a reload's amnesia. Only the clock can have
+    # raised it from our compiles, so only then is the banner ours to close —
+    # other error classes belong to hypr-error-watch, which toasts them from
+    # its own probes and never by reading the bar.
+    if st["on"] and st.get("animated"):
+        hyprctl("seterror", "disable")
+    # The forensic line. The error bar is raised at compile time and logged
+    # nowhere, so a banner photographed hours later has nothing to subpoena.
+    # This names every compile we cause — clock state, tier, tube count, with
+    # a wall clock — so a picture of the bar plus its timestamp convicts one
+    # specific swap, or acquits all of ours.
+    import datetime as _dt
+    print(f"crt: apply {_dt.datetime.now():%H:%M:%S} "
+          f"animated={1 if st.get('animated') else 0} on={int(st['on'])} "
+          f"tubes={n2.group(1) if n2 else 0}", flush=True)
     errs = (hyprctl("configerrors") or "").strip()
     if errs and "no errors" not in errs:
         print(errs, file=sys.stderr)

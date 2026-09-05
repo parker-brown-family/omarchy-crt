@@ -227,6 +227,22 @@ check "and a lifted glass never pays for a clock it is not drawing" \
 "$CRT" on >/dev/null 2>&1
 check "putting the glass back pays it again" "$(cat "$DAMAGE_STATE")" "0"
 
+# The banner Hyprland raises for the clock LATCHES: once drawn, nothing
+# re-evaluates it, and a reload was long believed the only way down. Measured
+# 2026-09-05: `hyprctl seterror disable` closes it instantly, with none of a
+# reload's amnesia. apply() presses that close button whenever the clock is
+# what it just compiled — and ONLY then, because every other class of banner
+# belongs to hypr-error-watch and its probes.
+SETERR_ON=$(grep -c "^seterror disable$" "$HYPRCTL_LOG")
+check "an animated apply closes the banner its own compile can latch" \
+  "$((SETERR_ON > 0))" "1"
+"$CRT" set TRACKING 0 >/dev/null 2>&1
+check "a still apply closes nothing — other banners are not ours to touch" \
+  "$(grep -c "^seterror disable$" "$HYPRCTL_LOG")" "$SETERR_ON"
+"$CRT" set TRACKING 0.5 >/dev/null 2>&1
+check "and restarting the clock presses it again" \
+  "$(grep -c "^seterror disable$" "$HYPRCTL_LOG")" "$((SETERR_ON + 1))"
+
 # The regression that would have shipped. GLSL ES will not take an int literal
 # for a const float, and %g drops the decimal point on every whole number, so
 # every "turn it off" rendered `= 0` and failed to compile. It failed SAFE —
