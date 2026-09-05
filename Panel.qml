@@ -283,7 +283,16 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(400))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(620))
+
+    // The floor is load-bearing, not padding. Every knob draws on a Canvas,
+    // and a Canvas measures nothing on the frame it is created — so on the
+    // frame the tray opens, column.implicitHeight is 0 and settles to its real
+    // value only afterwards. Sized from that zero the panel never created a
+    // layer surface at all: `open` reported success, the state said opened,
+    // and nothing appeared on screen, with no error anywhere. Herd escapes it
+    // because its rows carry a fixed height and measure immediately.
+    contentHeight: panel.fittedContentHeight(
+      Math.max(column.implicitHeight, Style.space(300)), Style.space(620))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -346,6 +355,9 @@ Panel {
                 required property int index
 
                 width: column.width / 4
+                // Explicit, so the row measures on the first frame instead of
+                // waiting for a Canvas to report a size.
+                height: implicitHeight
                 label: modelData.label
                 tint: root.phosphor
                 foreground: root.foreground
@@ -364,6 +376,7 @@ Panel {
             Knob {
               id: channelKnob
               width: column.width / 4
+              height: implicitHeight
               label: "CHANNEL"
               tint: root.phosphor
               foreground: root.foreground
@@ -479,6 +492,9 @@ Panel {
                 required property int index
 
                 width: column.width / 4
+                // Explicit, so the row measures on the first frame instead of
+                // waiting for a Canvas to report a size.
+                height: implicitHeight
                 label: modelData.label
                 tint: root.phosphor
                 foreground: root.foreground

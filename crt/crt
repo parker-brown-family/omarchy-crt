@@ -119,6 +119,9 @@ def load():
         "service": {},
         "channel": "auto",
         "on": True,
+        # Off. See the clock note in render() — this is the one default whose
+        # cost is a red banner across the user's desktop.
+        "animated": False,
     }
     if KNOBS.exists():
         try:
@@ -134,6 +137,8 @@ def load():
         # existed means nobody has said, and the glass stays where it was.
         if isinstance(got.get("on"), bool):
             st["on"] = got["on"]
+        if isinstance(got.get("animated"), bool):
+            st["animated"] = got["animated"]
     return st
 
 
@@ -254,21 +259,20 @@ def render(st, path=None):
         if n != 1:
             die(f"could not set {k} in the template")
 
-    # The clock follows the motion knobs, unless the service tier names
-    # ANIMATED by hand.
+    # THE CLOCK IS A SWITCH, NOT A CONSEQUENCE, and it ships off.
     #
-    # Read the RENDERED text, not the override dict. A knob nobody has touched
-    # is not zero — it is whatever the template says, and the template ships
-    # FLICKER at 0.35. Deciding from the overrides alone compiled the clock
-    # away whenever the only motion left was a default, which does not turn
-    # flicker off: it leaves FLICKER at 0.35 with a frozen clock, so the shader
-    # claims a burst it can never draw.
-    if "ANIMATED" in st["service"]:
-        animated = 1 if float(st["service"]["ANIMATED"]) else 0
-    else:
-        rendered = {m.group(1): float(m.group(2)) for m in
-                    re.finditer(r"^const float ([A-Z_0-9]+)\s*=\s*(-?[0-9.]+)", text, re.M)}
-        animated = 1 if any(rendered.get(m, 0.0) > 0.0 for m in MOTION) else 0
+    # Deriving it from the motion values looks right and is wrong at exactly
+    # the worst moment. The template ships TRACKING at 0.60 and FLICKER at
+    # 0.35 with ANIMATED at 0 — motion fully configured and deliberately
+    # frozen — because Hyprland refuses to keep damage tracking on for any
+    # shader that so much as declares `uniform float time`, and puts a
+    # three-line red banner across the desktop saying so. Deriving the clock
+    # meant a first render turned it on, and a fresh install greeted the user
+    # with that banner and a GPU redrawing the whole screen every frame.
+    #
+    # So it lives in state, defaults to off, and only a deliberate act raises
+    # it: turning a motion knob above zero, or naming ANIMATED outright.
+    animated = 1 if st.get("animated") else 0
     text = re.sub(r"^(#define ANIMATED\s+)[01]", rf"\g<1>{animated}", text, count=1, flags=re.M)
 
     ch = resolve_channel(st["channel"])
@@ -546,6 +550,26 @@ def commit(st):
     save(st)
 
 
+def set_damage_tracking(animated):
+    """Hyprland asks to be told, and until it is told the motion does not run.
+
+        Screen shader: Screen shader uses uniform 'time', which requires
+        debug:damage_tracking to be switched off.
+
+    That red banner across the desktop is not a grumble about a choice already
+    made — it is Hyprland saying the clock will not repaint until damage
+    tracking is actually off. Leaving it unset gets you the worst of both: a
+    permanent error bar AND a tracking band that never sweeps. So the clock and
+    this setting move together, and turning the clock back off restores the
+    default (2) rather than leaving the whole desktop redrawing forever because
+    a knob was once turned up.
+    """
+    val = "0" if animated else "2"
+    out = hyprctl("keyword", "debug:damage_tracking", val)
+    if out is not None and "non-legacy" in out:
+        hyprctl("eval", f"hl.config({{ debug = {{ damage_tracking = {val} }} }})")
+
+
 def apply(st):
     write_passthrough()
     out = render(st)
@@ -554,6 +578,7 @@ def apply(st):
         return
     # Re-setting the same path is a no-op, so drop and re-set to force a
     # recompile of the file we just changed.
+    set_damage_tracking(bool(st.get("animated")) and st["on"])
     set_shader(PASSTHROUGH)
     if st["on"]:
         set_shader(out)
@@ -654,6 +679,8 @@ def show(st):
     if st["channel"] == "auto":
         src = " (from the staged theme)" if ch else " (no theme staged — template colours)"
     print(f"  {'GLASS':<10} {'on' if st['on'] else 'off'}")
+    print(f"  {'CLOCK':<10} {'running' if st.get('animated') else 'stopped'}"
+          f"{'   (Hyprland redraws the whole screen every frame)' if st.get('animated') else ''}")
     for k in ("BARREL", "FADE", "TRACKING"):
         v = st["panel"].get(k, PANEL_DEFAULTS[k])
         print(f"  {k:<10} {v:.2f}   {round(v * 100):>3d}%")
@@ -710,12 +737,23 @@ def main(argv):
         if not rest or len(rest) % 2:
             die("set wants KNOB VALUE pairs")
         valid = known_knobs(template())
+        named_clock = False
         for k, v in zip(rest[::2], rest[1::2]):
             k = k.upper()
+            if k == "ANIMATED":
+                st["animated"] = bool(float(v))
+                st["service"].pop("ANIMATED", None)
+                named_clock = True
+                continue
             try:
                 fv = float(v)
             except ValueError:
                 die(f"'{v}' is not a number")
+            # Turning a motion knob is the deliberate act that starts the
+            # clock — and taking the last of them back to zero stops it, so
+            # you never pay for a redraw nothing is using.
+            if k in MOTION or (k in PANEL and k in MOTION):
+                st["animated"] = st["animated"] or fv > 0.0
             if k in PANEL:
                 st["panel"][k] = max(0.0, min(1.0, fv))
                 # Turning a macro takes back the constants it owns, so the dial
@@ -726,6 +764,26 @@ def main(argv):
                 st["service"][k] = fv
             else:
                 die(f"no such knob: {k} (`crt` to list)")
+
+        # And drop it again when nothing is left moving. This reads the values
+        # a render WOULD produce, template defaults included, because a knob
+        # nobody touched is not zero — FLICKER defaults to 0.35, and calling
+        # that still counts as motion.
+        #
+        # Naming ANIMATED in the same breath outranks the inference. Someone
+        # asking for a clock over a still picture has a reason (they are about
+        # to turn something up), and silently overruling them in the same
+        # command they typed it in is the tool arguing with its user.
+        if st["animated"] and not named_clock:
+            vals = expand(st)
+            probe = template()
+            for m in MOTION:
+                if m not in vals:
+                    hit = re.search(rf"^const float {m}\s*=\s*(-?[0-9.]+)", probe, re.M)
+                    vals[m] = float(hit.group(1)) if hit else 0.0
+            if not any(vals.get(m, 0.0) > 0.0 for m in MOTION):
+                st["animated"] = False
+
         commit(st)
         show(st)
         return

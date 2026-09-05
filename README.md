@@ -3,6 +3,8 @@
 Curved glass, scanlines and a phosphor glow over the whole Omarchy desktop —
 on **any** theme, with four knobs on the bar.
 
+![the front panel](docs/tray.png)
+
 A CRT filter is a **lens**, and a lens is not a palette. This one used to ship
 inside the `terminal-delight` theme, which meant you could own a curved monitor
 only if you agreed to wear green: catppuccin, gruvbox, tokyo-night, nord and
@@ -86,13 +88,24 @@ That is also why there is no rule about not committing your window layout. The
 tube data is runtime state, it lives in state, and there is no path from a
 window being open to a line in a commit.
 
-**Motion costs damage tracking.** Hyprland treats any screen shader that
-*declares* `uniform float time` as animated — the warning keys off the
-declaration, not the use — and switches damage tracking off for it, so the whole
-screen redraws every frame instead of just what changed. The still glass
-therefore compiles no clock at all. `crt` raises the clock when TRACKING,
-FLICKER or JIGGLE go above zero and drops it when all three are back down, and
-the tray says so while it is running.
+**Motion costs damage tracking, and it ships off.** Hyprland treats any screen
+shader that *declares* `uniform float time` as animated — the warning keys off
+the declaration, not the use — so the whole screen redraws every frame instead
+of just what changed. The still glass therefore compiles no clock at all, even
+though TRACKING sits at 0.60 and FLICKER at 0.35: the band is configured and
+deliberately frozen, and a fresh install is silent.
+
+Turning TRACKING, FLICKER or JIGGLE above zero starts it, and taking the last of
+them back to zero stops it. Starting it also sets `debug:damage_tracking` to 0,
+because Hyprland's three-line red banner —
+
+> Screen shader uses uniform 'time', which requires debug:damage_tracking to be
+> switched off.
+
+— is not a grumble about a choice you already made. It means the motion will not
+repaint until that setting is off. Leaving it unset earned the worst of both: a
+permanent error bar across the desktop *and* a tracking band that never swept.
+Stopping the clock hands the setting back.
 
 ## Where the pieces are
 
@@ -102,7 +115,7 @@ the tray says so while it is running.
 | `Knob.qml` | one dial — canvas face, angular drag, wheel |
 | `crt/crt-glass.frag` | the template, never written to |
 | `crt/crt` | render, knobs, channels, install |
-| `test/run` | 45 assertions in a sandbox, with `hyprctl` stubbed |
+| `test/run` | 68 assertions in a sandbox, with `hyprctl` and `systemctl` stubbed |
 
 ## What this does not do yet
 

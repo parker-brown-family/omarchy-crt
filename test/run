@@ -53,16 +53,22 @@ mkdir -p "$SANDBOX/bin"
 export HYPRCTL_LOG="$SANDBOX/hyprctl.log"
 export SHADER_STATE="$SANDBOX/screen_shader"
 export TD_TUBES_STATE="$SANDBOX/td-tubes-active"
+export DAMAGE_STATE="$SANDBOX/damage_tracking"
 : >"$SHADER_STATE"
 echo inactive >"$TD_TUBES_STATE"
+echo 2 >"$DAMAGE_STATE"
 
 cat >"$SANDBOX/bin/hyprctl" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >>"$HYPRCTL_LOG"
 case "$1" in
   configerrors) echo "no errors" ;;
-  getoption)    echo "str: $(cat "$SHADER_STATE")"; echo "set: true" ;;
-  keyword)      [[ "$2" == "decoration:screen_shader" ]] && printf '%s' "$3" >"$SHADER_STATE" ;;
+  getoption)
+    if [[ "$2" == "debug:damage_tracking" ]]; then echo "int: $(cat "$DAMAGE_STATE")"
+    else echo "str: $(cat "$SHADER_STATE")"; echo "set: true"; fi ;;
+  keyword)
+    [[ "$2" == "decoration:screen_shader" ]]  && printf '%s' "$3" >"$SHADER_STATE"
+    [[ "$2" == "debug:damage_tracking" ]]     && printf '%s' "$3" >"$DAMAGE_STATE" ;;
 esac
 exit 0
 STUB
@@ -172,16 +178,50 @@ echo "the clock follows the motion knobs"
 # ---------------------------------------------------------------------------
 animated() { grep -oE '^#define ANIMATED +[01]' "$SHADER" | grep -oE '[01]$'; }
 
-# The one that used to be wrong: a knob nobody has touched is not zero, it is
-# whatever the template says, and the template ships FLICKER at 0.35. Turning
-# TRACKING down does not turn the clock off, because flicker is still motion.
+# THE DEFAULT IS OFF, and this is the assertion that matters most in the file.
+# Hyprland refuses to keep damage tracking on for a shader that so much as
+# DECLARES `uniform float time`, and puts a three-line red banner across the
+# desktop about it. The template ships TRACKING 0.60 and FLICKER 0.35 with
+# ANIMATED 0 — motion configured, deliberately frozen — and deriving the clock
+# from those values instead meant a fresh install greeted the user with that
+# banner and a GPU redrawing everything every frame. Caught on a live desktop,
+# not here; this is what stops it coming back.
+rm -rf "$XDG_STATE_HOME/omarchy/crt"
+"$CRT" render >/dev/null 2>&1
+check "a fresh install ships the clock STOPPED, despite TRACKING at 0.60" \
+  "$(animated)" "0"
+check "with the tracking band still configured, just frozen" \
+  "$(constof "$SHADER" TRACKING)" "0.6"
+
+"$CRT" set TRACKING 0.5 >/dev/null 2>&1
+check "turning a motion knob is the deliberate act that starts it" "$(animated)" "1"
 "$CRT" set TRACKING 0 >/dev/null 2>&1
-check "tracking alone at zero keeps the clock, because FLICKER defaults to 0.35" \
+check "tracking alone at zero keeps it, because FLICKER defaults to 0.35" \
   "$(animated)" "1"
 "$CRT" set FLICKER 0 JIGGLE 0 >/dev/null 2>&1
-check "all three at zero compiles the clock away" "$(animated)" "0"
+check "the last of the motion going to zero stops it again" "$(animated)" "0"
+"$CRT" set ANIMATED 1 >/dev/null 2>&1
+check "or name it outright" "$(animated)" "1"
+"$CRT" set ANIMATED 0 >/dev/null 2>&1
+check "and outright the other way" "$(animated)" "0"
+
+# The clock and damage tracking move together, because Hyprland's red banner is
+# not a grumble about a choice already made — it says the motion will not
+# repaint until damage tracking is off. Leaving it unset earned the worst of
+# both: a permanent error bar across the desktop AND a tracking band that never
+# swept. Caught on a live desktop after the band was turned up by hand.
+check "clock off leaves damage tracking at the default" "$(cat "$DAMAGE_STATE")" "2"
 "$CRT" set TRACKING 0.5 >/dev/null 2>&1
-check "turning tracking up brings the clock back" "$(animated)" "1"
+check "starting the clock switches damage tracking off, as Hyprland asks" \
+  "$(cat "$DAMAGE_STATE")" "0"
+"$CRT" set TRACKING 0 FLICKER 0 JIGGLE 0 >/dev/null 2>&1
+check "stopping it hands damage tracking back" "$(cat "$DAMAGE_STATE")" "2"
+"$CRT" off >/dev/null 2>&1
+"$CRT" set TRACKING 0.5 >/dev/null 2>&1
+check "and a lifted glass never pays for a clock it is not drawing" \
+  "$(cat "$DAMAGE_STATE")" "2"
+"$CRT" on >/dev/null 2>&1
+check "putting the glass back pays it again" "$(cat "$DAMAGE_STATE")" "0"
 
 # The regression that would have shipped. GLSL ES will not take an int literal
 # for a const float, and %g drops the decimal point on every whole number, so
