@@ -61,9 +61,9 @@ const float GLOW       = 0.40;  // 4-tap bloom
 const float BLOOM      = 0.35;  // centre phosphor wash        (TD bloom)
 const float VIGN       = 0.32;  // corner falloff              (TD vignette)
 const float SPECULAR   = 0.50;  // upper-left room-light catch on the glass
-const float TRACKING   = 0.60;  // rolling band strength       (TD tracking)
-const float TRACK_PERIOD = 19.325;// seconds between sweeps    (sweep + a 9s rest)
-const float TRACK_SWEEP  = 10.325; // seconds one sweep takes  (TD tracking_sweep: 7)
+const float TRACKING   = 0.60;  // band strength AND speed — see track_sweep()
+const float TRACK_REST   = 9.0; // seconds of quiet between passes
+const float TRACK_SWEEP  = 8.0; // nominal seconds per sweep; TRACKING scales it
 const float BAND_H     = 264.0; // band height in px           (crt.rs BAND_H: 160)
 const float FLICKER    = 0.35;  // stepped burst depth         (TD flicker)
 const float GLARE      = 0.00;  // WHOLE-SCREEN glare — off by default now that the
@@ -219,7 +219,7 @@ vec2 tube_size(int i, vec2 res) {
 // in unison, and tiles that did would read as one screen-wide band again —
 // which is the thing this whole change is for.
 float tube_phase(int i) {
-    return i < 0 ? 0.0 : fract(sin(float(i) * 12.9898) * 43758.5453) * TRACK_PERIOD;
+    return i < 0 ? 0.0 : fract(sin(float(i) * 12.9898) * 43758.5453) * 40.0;
 }
 // ---- end tubes -------------------------------------------------------------
 
@@ -244,13 +244,26 @@ float flicker_mul(float t) {
 // its centre, phosphor-tinted with a thin white core, sweeping top→bottom
 // over TRACK_SWEEP seconds then resting out the period — crt.rs's numbers,
 // as a continuous profile instead of painted rows.
+// The band's speed rides the same knob as its strength: turned down it is 40%
+// slower, turned up 10% faster. One dial, one character — a faint band that
+// also drifts is a calm picture, where a faint band moving at the same rate is
+// just the same band quieter.
+float track_sweep()  { return TRACK_SWEEP * (1.40 - 0.50 * TRACKING); }
+
+// Derived, never stored. A fixed period cannot survive a variable sweep: the
+// band is visible for the sweep out of every period, so a sweep that grew past
+// the period would never rest. The REST is the constant, and it is also the
+// parameter a viewer actually notices — the gap between passes, not the sum.
+float track_period() { return track_sweep() + TRACK_REST; }
+
 vec3 tracking_add(float py, float screen_h, float t, inout float darken) {
     if (TRACKING < 0.001) return vec3(0.0);
     // `screen_h` is the TUBE's height when the pixel is in one, so the band is
     // a band on that monitor rather than a stripe across the desk.
-    float tc = mod(t, TRACK_PERIOD);
-    if (tc > TRACK_SWEEP) return vec3(0.0);
-    float p = tc / TRACK_SWEEP;
+    float sweep = track_sweep();
+    float tc = mod(t, track_period());
+    if (tc > sweep) return vec3(0.0);
+    float p = tc / sweep;
     float center = -BAND_H + p * (screen_h + BAND_H * 2.0);
     float d = 1.0 - clamp(abs(py - center) / (BAND_H * 0.5), 0.0, 1.0);
     if (d <= 0.0) return vec3(0.0);

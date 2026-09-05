@@ -86,7 +86,7 @@ Panel {
 
 
   // The six service knobs that are natural 0..1 dials. The rest of the tube —
-  // SCAN_STEP, BAND_H, TRACK_PERIOD, the colour grade — has ranges a knob would
+  // SCAN_STEP, BAND_H, TRACK_REST, the colour grade — has ranges a knob would
   // lie about, so those stay on the command line rather than being squeezed
   // onto a dial that reads 40% and means four pixels.
   readonly property var serviceKnobs: [

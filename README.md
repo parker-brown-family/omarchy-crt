@@ -38,7 +38,7 @@ knob turns validated before they reach the screen, install `glslangValidator`
 |---|---|
 | **BARREL** | how far the glass bows — `TUBE_K1`, `TUBE_K2` |
 | **FADE** | the phosphor wash — `BLOOM`, `GLOW`, `VIGN` |
-| **TRACKING** | the band that rolls down the picture |
+| **TRACKING** | the band that rolls down the picture — strength *and* speed: down is 40% slower, up is 10% faster |
 | **CHANNEL** | which phosphor: `AUTO`, green (P1), amber (P3), white (P4) |
 
 Grab a knob and turn it — it accumulates the angle you sweep, from wherever the
