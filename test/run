@@ -13,12 +13,14 @@
 #      outside the repo, template read-only — and it is one stat to verify.
 #   2. A default render reproduces the shader terminal-delight ships today.
 #      That is the migration promise: installing the plugin changes no pixels.
-#   3. AUTO takes its colours from the staged theme, and a different staged
-#      theme gives different colours. That is the claim that this works on any
-#      theme, and it is the reason the plugin exists.
-#   4. Every render compiles. A knob that does not compile must leave the live
-#      shader exactly where it was.
-#   5. install() is idempotent and uninstall() leaves nothing behind.
+#   3. The phosphor takes its colours from the staged theme, and a different
+#      staged theme gives different colours, while the OPTICS do not move at
+#      all. That is the claim that this works on any theme, and it is the
+#      reason the plugin exists rather than being a theme.
+#   4. Every render compiles, and a knob that does not compile leaves the live
+#      shader exactly where it was — including a half-written tube block.
+#   5. It refuses to fight another owner of decoration:screen_shader.
+#   6. install() is idempotent and uninstall() leaves nothing behind.
 
 set -uo pipefail
 
@@ -148,14 +150,19 @@ fi
 
 # ---------------------------------------------------------------------------
 echo
-echo "AUTO takes its colour from whatever theme is staged"
+echo "the phosphor is the staged theme's, with no way to override it"
+# ---------------------------------------------------------------------------
+# There is no CHANNEL dial any more. It made this plugin a third authority on
+# the colour of a desktop that already has two — the theme sets the palette,
+# Terminal Paint tints tiles — which contradicts the argument the whole plugin
+# rests on. So the only question left is whether the hue tracks the theme.
 # ---------------------------------------------------------------------------
 stage_theme "#7aa2f7" "#c0caf5"          # tokyo-night
-"$CRT" channel auto >/dev/null 2>&1
+"$CRT" render >/dev/null 2>&1
 TOKYO="$(vec3of "$SHADER" PHOSPHOR)"
-TOKYO_GLARE="$(vec3of "$SHADER" GLARE_TINT)"
 check "phosphor follows tokyo-night's accent" "$TOKYO" "0.478, 0.635, 0.969"
-check "glare follows tokyo-night's bright_foreground" "$TOKYO_GLARE" "0.753, 0.792, 0.961"
+check "glare follows tokyo-night's bright_foreground" \
+  "$(vec3of "$SHADER" GLARE_TINT)" "0.753, 0.792, 0.961"
 
 stage_theme "#d79921" "#fbf1c7"          # gruvbox
 "$CRT" render >/dev/null 2>&1
@@ -169,11 +176,8 @@ check "curvature is untouched by the theme switch" \
   "$(constof "$SHADER" TUBE_K1)" "0.143"
 
 "$CRT" channel green >/dev/null 2>&1
-check "an explicit channel overrides the theme" \
-  "$(vec3of "$SHADER" PHOSPHOR)" "0.133, 0.773, 0.369"
+check "there is no channel command to override it with" "$?" "1"
 
-# ---------------------------------------------------------------------------
-echo
 echo "the clock follows the motion knobs"
 # ---------------------------------------------------------------------------
 animated() { grep -oE '^#define ANIMATED +[01]' "$SHADER" | grep -oE '[01]$'; }
@@ -260,7 +264,7 @@ check "and did not touch the live shader" \
   "$(sha256sum "$SHADER" | cut -d' ' -f1)" "$BEFORE_BAD"
 check "and did not reach the state file" \
   "$(grep -c NOSUCHKNOB "$XDG_STATE_HOME/omarchy/crt/knobs.json")" "0"
-"$CRT" set SCAN 0.3 >/dev/null 2>&1
+"$CRT" set SCANLINE 0.3 >/dev/null 2>&1
 check "the tool still works after a refused setting" \
   "$(constof "$SHADER" SCAN)" "0.3"
 
@@ -282,12 +286,17 @@ check "off is recorded" "$(grep -c '"on": false' "$LIVE")" "1"
 "$CRT" on >/dev/null 2>&1
 check "on is recorded" "$(grep -c '"on": true' "$LIVE")" "1"
 
-# AUTO against no theme at all is UNKNOWN, not black.
+# No theme staged at all is UNKNOWN, not black. The template's own colours
+# stand and live.json says nobody supplied one, rather than reporting a hue it
+# invented.
 rm -f "$XDG_STATE_HOME/omarchy/current/theme/colors.toml"
-"$CRT" channel auto >/dev/null 2>&1
-check "AUTO with no theme staged resolves to null, not a colour" \
-  "$(grep -c '"channelResolved": null' "$LIVE")" "1"
+"$CRT" render >/dev/null 2>&1
+check "no theme staged reports null, not a colour it made up" \
+  "$(grep -c '"phosphorFrom": null' "$LIVE")" "1"
 stage_theme "#67F454" "#DFE2E3"
+"$CRT" render >/dev/null 2>&1
+check "and a staged theme says where the hue came from" \
+  "$(grep -c '"phosphorFrom": "theme"' "$LIVE")" "1"
 
 # ---------------------------------------------------------------------------
 echo
@@ -392,6 +401,50 @@ check "no theme-set hook was installed by try" \
 "$CRT" untry >/dev/null 2>&1
 check "untry puts the previous shader back exactly" \
   "$(cat "$SHADER_STATE")" "/some/theme/crt-glass.frag"
+
+echo
+echo "tube data is spliced from state, and never trusted blindly"
+# ---------------------------------------------------------------------------
+# A tube is runtime state, so the block lives outside the template. Splicing it
+# in unchecked took the shader down: an empty tubes.glsl removes the
+# `#define TUBE_COUNT` line, which leaves `#if TUBE_COUNT > 0` dangling and the
+# whole file uncompilable. Caught live, when a watcher wrote a partial file.
+# ---------------------------------------------------------------------------
+TUBEFILE="$XDG_STATE_HOME/omarchy/crt/tubes.glsl"
+check "with no tubes file the template's own zero stands" \
+  "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$SHADER")" "#define TUBE_COUNT 0"
+
+cat >"$TUBEFILE" <<'TUBES'
+#define TUBE_COUNT 2
+#if TUBE_COUNT > 0
+const vec4 TUBE_RECT[TUBE_COUNT] = vec4[TUBE_COUNT](
+    vec4(0.0, 0.0, 960.0, 1080.0),
+    vec4(960.0, 0.0, 960.0, 1080.0)
+);
+const int  TUBE_MON[TUBE_COUNT]  = int[TUBE_COUNT](
+    0, 0
+);
+const float TUBE_CURV[TUBE_COUNT] = float[TUBE_COUNT](
+    1.0, 1.0
+);
+#endif
+TUBES
+"$CRT" render >/dev/null 2>&1
+check "a real block is spliced in" \
+  "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$SHADER")" "#define TUBE_COUNT 2"
+check "and the result still compiles" "$?" "0"
+check "live.json reports the tube count" \
+  "$(grep -c '\"tubes\": 2' "$LIVE")" "1"
+
+: >"$TUBEFILE"
+"$CRT" render >/dev/null 2>&1
+check "an empty tubes file is IGNORED, not spliced" \
+  "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$SHADER")" "#define TUBE_COUNT 0"
+printf 'const int junk = 1;\n' >"$TUBEFILE"
+"$CRT" render >/dev/null 2>&1
+check "so is a block that defines no count" \
+  "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$SHADER")" "#define TUBE_COUNT 0"
+rm -f "$TUBEFILE"
 
 echo
 echo "the QML is at least syntactically a plugin"

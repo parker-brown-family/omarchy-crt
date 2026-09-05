@@ -74,7 +74,7 @@ const float BRIGHTNESS = 0.00;  // -1..1                       (TD grade brightn
 const float CONTRAST   = 0.00;  // -1..1                       (TD grade contrast)
 const float SATURATION = 1.00;  // 0..2                        (TD grade colour)
 const float GAMMA      = 1.00;  // 0.5..2                      (TD grade gamma)
-const vec3  PHOSPHOR   = vec3(0.133, 0.773, 0.369); // CHANNEL rewrites this — `crt channel`
+const vec3  PHOSPHOR   = vec3(0.133, 0.773, 0.369); // from the staged theme's accent
 const vec3  GLARE_TINT = vec3(0.72, 1.00, 0.78);    // crt_pass.wgsl glare_color
 // ---- END CONFIG --------------------------------------------------------
 
@@ -165,8 +165,15 @@ int tube_at(vec2 px) {
 // falls to 0 across the overscan band the gather pulls in from past the tile's
 // own edge; that band is the bezel, and it is why the tube reads as glass with
 // a rim rather than as a squashed window.
-vec2 tube_map(int i, vec2 t, vec2 res, out float edge) {
-    edge = 1.0;
+// `local` comes back as the position WITHIN the tube, 0..1 across its own
+// rect — and it is what every effect below is measured in. Without it each
+// effect had only the screen to measure against, so one vignette covered the
+// whole desktop and one band swept across every window at once. On bare
+// desktop, where there is no tube, local is the screen coordinate and
+// everything behaves exactly as it did.
+vec2 tube_map(int i, vec2 t, vec2 res, out float edge, out vec2 local) {
+    edge  = 1.0;
+    local = t;
 #if TUBE_COUNT > 0
     if (i < 0)
         return t;
@@ -179,10 +186,29 @@ vec2 tube_map(int i, vec2 t, vec2 res, out float edge) {
     // At k = 0 this is the identity, and a flat surface must not wear a bezel:
     // the smoothstep would still black the outermost pixels of its own rect.
     edge     = k > 0.0 ? smoothstep(0.0, 0.004, min(e.x, e.y)) : 1.0;
-    return (r.xy + clamp(w, 0.0, 1.0) * r.zw) / res;
+    local    = clamp(w, 0.0, 1.0);
+    return (r.xy + local * r.zw) / res;
 #else
     return t;
 #endif
+}
+
+// The tube's own pixel size, for anything measured in pixels rather than in
+// fractions — the band height and the scanline pitch. Falls back to the whole
+// screen when the pixel belongs to no tube.
+vec2 tube_size(int i, vec2 res) {
+#if TUBE_COUNT > 0
+    if (i >= 0)
+        return TUBE_RECT[i].zw;
+#endif
+    return res;
+}
+
+// A per-tube offset into the tracking cycle. Real sets on one desk do not sweep
+// in unison, and tiles that did would read as one screen-wide band again —
+// which is the thing this whole change is for.
+float tube_phase(int i) {
+    return i < 0 ? 0.0 : fract(sin(float(i) * 12.9898) * 43758.5453) * TRACK_PERIOD;
 }
 // ---- end tubes -------------------------------------------------------------
 
@@ -209,6 +235,8 @@ float flicker_mul(float t) {
 // as a continuous profile instead of painted rows.
 vec3 tracking_add(float py, float screen_h, float t, inout float darken) {
     if (TRACKING < 0.001) return vec3(0.0);
+    // `screen_h` is the TUBE's height when the pixel is in one, so the band is
+    // a band on that monitor rather than a stripe across the desk.
     float tc = mod(t, TRACK_PERIOD);
     if (tc > TRACK_SWEEP) return vec3(0.0);
     float p = tc / TRACK_SWEEP;
@@ -261,18 +289,24 @@ void main() {
 
     int   tube = tube_at(uvs * res);
     float tedge;
-    vec2  uv   = tube_map(tube, uvs, res, tedge);
+    vec2  L;                       // 0..1 inside this tube — see tube_map
+    vec2  uv   = tube_map(tube, uvs, res, tedge, L);
     edge       = min(edge, tedge);
     if (edge <= 0.0) { fragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
 
-    float r2 = dot(uv - 0.5, uv - 0.5);
+    vec2  tsize = tube_size(tube, res);
+
+    // EVERY EFFECT BELOW IS MEASURED FROM THE TUBE, NOT THE SCREEN. r2 is the
+    // distance from this tube's centre, so a tile gets its own rim rather than
+    // sharing one vignette with the whole desktop.
+    float r2 = dot(L - 0.5, L - 0.5);
 
     // chromatic aberration: sample R/B at slightly different warps near the rim
     float a  = ABERR * 0.004 * r2;
-    float ta;
-    float cr = texture(tex, tube_map(tube, warp(uv0 + vec2(a, 0.0)), res, ta)).r;
+    float ta; vec2 tl;
+    float cr = texture(tex, tube_map(tube, warp(uv0 + vec2(a, 0.0)), res, ta, tl)).r;
     float cg = texture(tex, uv).g;
-    float cb = texture(tex, tube_map(tube, warp(uv0 - vec2(a, 0.0)), res, ta)).b;
+    float cb = texture(tex, tube_map(tube, warp(uv0 - vec2(a, 0.0)), res, ta, tl)).b;
     vec3  col = vec3(cr, cg, cb);
 
     // scanlines: px-true — a 1px dark line then a 1px phosphor-tinted line
@@ -281,7 +315,9 @@ void main() {
     float scanA = SCAN * fl;
     if (scanA > 0.001) {
         if (SCAN_STEP > 0.5) {
-            float row = mod(uv.y * res.y, SCAN_STEP);
+            // Rows counted down the TUBE, so they bow with it instead of
+            // staying stapled to the desktop underneath.
+            float row = mod(L.y * tsize.y, SCAN_STEP);
             if (row < 1.0) {
                 col = mix(col, vec3(0.0), scanA);
             } else if (row < 2.0) {
@@ -304,19 +340,19 @@ void main() {
     // centre phosphor wash: nothing above 5%, ramping to full at 42% and
     // holding below — the tube's brightest belt, in the theme's own hue.
     if (BLOOM > 0.001) {
-        col = mix(col, PHOSPHOR, 0.05 * BLOOM * smoothstep(0.05, 0.42, uv.y));
+        col = mix(col, PHOSPHOR, 0.05 * BLOOM * smoothstep(0.05, 0.42, L.y));
     }
 
     // the rolling tracking band, plus its band-local scanline pressure
     float darken = 0.0;
-    col += tracking_add(uv.y * res.y, res.y, t, darken);
+    col += tracking_add(L.y * tsize.y, tsize.y, t + tube_phase(tube), darken);
     col *= 1.0 - darken * 0.5;
 
-    col += glare_add(uv);
+    col += glare_add(L);
 
     // upper-left specular: the room's light source catching the glass
     if (SPECULAR > 0.001) {
-        vec2 so = (uv - vec2(0.05, 0.04)) / vec2(0.13, 0.10);
+        vec2 so = (L - vec2(0.05, 0.04)) / vec2(0.13, 0.10);
         col += vec3(0.05 * SPECULAR) * exp(-dot(so, so)) * fl;
     }
 

@@ -4,7 +4,6 @@
     crt                        what every knob is set to right now
     crt set BARREL 0.7         turn a knob (repeat pairs for several)
     crt set SCAN 0.35 VIGN 0.2 service knobs take their raw shader names
-    crt channel amber          phosphor: auto | green | amber | white | #RRGGBB
     crt on / crt off           lift the glass off the screen
 
     crt doctor                 what else on this box wants the screen shader
@@ -29,8 +28,8 @@ and the live shader at ~/.config/hypr/shaders/crt-glass.frag is a build output
 that can be deleted at any time and rebuilt from those two.
 
 TWO TIERS OF KNOB. The front panel is four dials, because a real set had four:
-BARREL, FADE and TRACKING each drive a group of shader constants, and CHANNEL
-picks the phosphor. Behind that, every one of the twenty-two constants is
+BARREL, FADE, TRACKING and SCANLINE each drive a group of shader constants.
+Behind that, every one of the twenty-two constants is
 reachable by its own name, and a service knob set by hand outranks the macro
 that would otherwise cover it — until you turn that macro again.
 """
@@ -88,21 +87,26 @@ PANEL = {
     "BARREL":   {"TUBE_K1": 0.26, "TUBE_K2": 0.11},
     "FADE":     {"BLOOM": 0.55, "GLOW": 0.63, "VIGN": 0.50},
     "TRACKING": {"TRACKING": 1.00},
+    "SCANLINE": {"SCAN": 1.00},
 }
-PANEL_DEFAULTS = {"BARREL": 0.55, "FADE": 0.64, "TRACKING": 0.60}
+PANEL_DEFAULTS = {"BARREL": 0.55, "FADE": 0.64, "TRACKING": 0.60, "SCANLINE": 0.22}
 
 # Motion costs Hyprland's damage tracking (the time uniform forces a full-screen
 # redraw every frame), so the clock follows these three rather than being a
 # fourth thing to remember.
 MOTION = ("TRACKING", "FLICKER", "JIGGLE")
 
-CHANNELS = {
-    # name:    (phosphor, glare)   glare is the room light caught on the glass,
-    #                              so it is near-white in every real tube.
-    "green": ("#22C55E", "#B7FFC7"),   # P1  — the classic
-    "amber": ("#FFB000", "#FFE0A3"),   # P3  — the other classic
-    "white": ("#D8E2F0", "#FFFFFF"),   # P4  — a paper-white VDU
-}
+# THERE IS NO PHOSPHOR KNOB, AND THAT IS THE POINT.
+#
+# An earlier draft had a CHANNEL dial that switched between P1 green, P3 amber
+# and a paper-white VDU. It went, because it made this plugin a third authority
+# on the colour of a desktop that already has two: the Omarchy theme sets the
+# palette, and Terminal Paint tints individual tiles. A dial that overrides both
+# contradicts the argument this plugin is built on — that a lens is not a
+# palette, and the optics have no business having an opinion about hue.
+#
+# So the phosphor is always the staged theme's `accent` and the glare its
+# `bright_foreground`. Nothing to choose, nothing to get out of step.
 
 
 def die(msg):
@@ -117,7 +121,6 @@ def load():
     st = {
         "panel": dict(PANEL_DEFAULTS),
         "service": {},
-        "channel": "auto",
         "on": True,
         # Off. See the clock note in render() — this is the one default whose
         # cost is a red banner across the user's desktop.
@@ -131,8 +134,6 @@ def load():
         for k in ("panel", "service"):
             if isinstance(got.get(k), dict):
                 st[k].update(got[k])
-        if isinstance(got.get("channel"), str):
-            st["channel"] = got["channel"]
         # An absent "on" is not "off": a state file written before the key
         # existed means nobody has said, and the glass stays where it was.
         if isinstance(got.get("on"), bool):
@@ -190,20 +191,6 @@ def theme_colours():
     return ph, gl
 
 
-def resolve_channel(name):
-    """-> (phosphor, glare, label) or None to leave the template's own colours."""
-    if name == "auto":
-        got = theme_colours()
-        if got is None:
-            return None
-        return got[0], got[1], "auto"
-    if name in CHANNELS:
-        ph, gl = CHANNELS[name]
-        return hex_to_vec3(ph), hex_to_vec3(gl), name
-    if name.startswith("#"):
-        ph = hex_to_vec3(name)
-        return ph, lift(ph), name
-    die(f"no such channel: {name} — auto, {', '.join(CHANNELS)}, or #RRGGBB")
 
 
 # --------------------------------------------------------------------- render
@@ -275,9 +262,11 @@ def render(st, path=None):
     animated = 1 if st.get("animated") else 0
     text = re.sub(r"^(#define ANIMATED\s+)[01]", rf"\g<1>{animated}", text, count=1, flags=re.M)
 
-    ch = resolve_channel(st["channel"])
+    # The phosphor is the staged theme's, or the template's own when no theme
+    # is staged — which is unknown, not black, and so is left alone.
+    ch = theme_colours()
     if ch is not None:
-        ph, gl, _ = ch
+        ph, gl = ch
         text = re.sub(r"^(const vec3  PHOSPHOR   = )vec3\([^)]*\);",
                       rf"\g<1>vec3({ph[0]:.3f}, {ph[1]:.3f}, {ph[2]:.3f});",
                       text, count=1, flags=re.M)
@@ -286,12 +275,22 @@ def render(st, path=None):
                       text, count=1, flags=re.M)
 
     # Tubes are runtime state and live outside the template entirely.
+    #
+    # The block is checked before it is trusted. An empty or truncated
+    # tubes.glsl spliced in verbatim takes `#define TUBE_COUNT` out of the
+    # shader, which leaves `#if TUBE_COUNT > 0` dangling and the whole file
+    # uncompilable — a state file half-written by a watcher would take the
+    # glass down. It must at minimum define the count it is providing.
     if TUBES.exists():
         block = TUBES.read_text()
-        text = re.sub(
-            r"(// ---- TUBE DATA[^\n]*\n).*?(// ---- END TUBE DATA ----)",
-            lambda m: m.group(1) + block.rstrip("\n") + "\n" + m.group(2),
-            text, count=1, flags=re.S)
+        if not re.search(r"^\s*#define TUBE_COUNT\s+\d+", block, re.M):
+            print(f"warning: ignoring {TUBES} — it defines no TUBE_COUNT",
+                  file=sys.stderr)
+        else:
+            text = re.sub(
+                r"(// ---- TUBE DATA[^\n]*\n).*?(// ---- END TUBE DATA ----)",
+                lambda m: m.group(1) + block.rstrip("\n") + "\n" + m.group(2),
+                text, count=1, flags=re.S)
 
     out = Path(path) if path else SHADER
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -328,10 +327,11 @@ def publish(st, text):
     to no colour at all, and a panel reading the request would happily draw the
     theme's accent over a shader that is still using the template's.
     """
-    ch = resolve_channel(st["channel"])
+    ch = theme_colours()
     consts = {m.group(1): float(m.group(2))
               for m in re.finditer(r"^const float ([A-Z_0-9]+)\s*=\s*(-?[0-9.]+)", text, re.M)}
     animated = re.search(r"^#define ANIMATED\s+([01])", text, re.M)
+    tubes = re.search(r"^#define TUBE_COUNT\s+(\d+)", text, re.M)
 
     def hexof(group):
         m = re.search(rf"^const vec3  {group} += vec3\(([^)]*)\);", text, re.M)
@@ -342,13 +342,17 @@ def publish(st, text):
 
     doc = {
         "on": st["on"],
-        "channel": st["channel"],
-        # Resolved, or null when AUTO found no theme to resolve against. Null
-        # is not black here: it is "nobody said", and the panel says so.
-        "channelResolved": ch[2] if ch else None,
+        # null when no theme is staged to take a colour from. Null is not
+        # black here: it is "nobody said", and the panel says so.
+        "phosphorFrom": "theme" if ch else None,
         "phosphor": hexof("PHOSPHOR"),
         "glare": hexof("GLARE_TINT"),
         "animated": int(animated.group(1)) if animated else 0,
+        # How many tiles are wearing their own tube. Zero means the glass is
+        # one flat sheet over the desktop, which is a different picture and
+        # worth saying out loud rather than leaving the reader to wonder why
+        # nothing is curved.
+        "tubes": int(tubes.group(1)) if tubes else 0,
         "panel": {k: st["panel"].get(k, PANEL_DEFAULTS[k]) for k in PANEL_DEFAULTS},
         "consts": consts,
         "shader": str(SHADER),
@@ -635,7 +639,7 @@ end
 
 
 def write_theme_hook():
-    """Re-render when the theme changes, so CHANNEL AUTO means anything.
+    """Re-render when the theme changes, so the phosphor follows it.
 
     Omarchy runs every executable in hooks/theme-set.d/ after a theme switch.
     Without this the phosphor derived from a theme's accent would go stale the
@@ -649,8 +653,7 @@ def write_theme_hook():
 #
 # Omarchy passes the new theme's snake-cased name as $1; it is unused, because
 # `crt render` reads the freshly staged colors.toml itself rather than trusting
-# a name to map to a palette. Only CHANNEL AUTO actually changes anything here
-# — an explicit channel renders identical output and the write is a no-op.
+# a name to map to a palette.
 '{PLUGIN / "crt"}' render >/dev/null 2>&1
 exit 0
 """)
@@ -674,17 +677,15 @@ def uninstall():
 
 
 def show(st):
-    ch = resolve_channel(st["channel"])
-    src = ""
-    if st["channel"] == "auto":
-        src = " (from the staged theme)" if ch else " (no theme staged — template colours)"
+    ch = theme_colours()
     print(f"  {'GLASS':<10} {'on' if st['on'] else 'off'}")
     print(f"  {'CLOCK':<10} {'running' if st.get('animated') else 'stopped'}"
           f"{'   (Hyprland redraws the whole screen every frame)' if st.get('animated') else ''}")
     for k in ("BARREL", "FADE", "TRACKING"):
         v = st["panel"].get(k, PANEL_DEFAULTS[k])
         print(f"  {k:<10} {v:.2f}   {round(v * 100):>3d}%")
-    print(f"  {'CHANNEL':<10} {st['channel']}{src}")
+    print(f"  {'PHOSPHOR':<10} "
+          f"{'from the staged theme' if ch else 'template default (no theme staged)'}")
     if st["service"]:
         print("\n  service panel:")
         for k in sorted(st["service"]):
@@ -787,23 +788,13 @@ def main(argv):
         commit(st)
         show(st)
         return
-    if cmd == "channel":
-        if not rest:
-            print(st["channel"])
-            return
-        name = rest[0]
-        resolve_channel(name)          # validates, or dies
-        st["channel"] = name
-        commit(st)
-        show(st)
-        return
     if cmd in ("on", "off"):
         st["on"] = cmd == "on"
         commit(st)
         print("glass on" if st["on"] else "glass lifted")
         return
 
-    die(f"unknown command '{cmd}' — crt [list|set|channel|on|off|install|uninstall|render]")
+    die(f"unknown command '{cmd}' — crt [list|set|on|off|doctor|try|untry|install|uninstall|render]")
 
 
 if __name__ == "__main__":

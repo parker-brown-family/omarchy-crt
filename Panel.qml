@@ -14,11 +14,16 @@ import qs.Ui
 //
 // One bar icon and one tray. The icon is the set; the tray is the front of it,
 // with the four knobs a real one had. BARREL bends the glass, FADE is the
-// phosphor wash, TRACKING is the band that rolls down the picture, and CHANNEL
-// picks which phosphor you are tuned to — including AUTO, which takes its hue
-// from whatever Omarchy theme is staged. That last one is why this is a plugin
-// and not a theme: the optics belong to the set, the colour belongs to the
-// picture, and they were welded together for no reason anyone could name.
+// phosphor wash, TRACKING is the band that rolls down the picture, SCANLINE is
+// the line structure.
+//
+// There is no phosphor dial, and there was: a CHANNEL knob picking P1 green, P3
+// amber or a paper-white VDU. It went because it made this plugin a third
+// authority on the colour of a desktop that already has two — the Omarchy theme
+// sets the palette and Terminal Paint tints individual tiles — which is the
+// opposite of the argument the plugin is built on. The hue comes from whatever
+// theme is staged, always: the optics belong to the set, the colour belongs to
+// the picture, and they were welded together for no reason anyone could name.
 //
 // This file is a pure display and a command line. It never writes the shader.
 // `crt` renders that from its own template plus knobs.json, and publishes what
@@ -68,9 +73,9 @@ Panel {
 
   readonly property var panelKnobs: (live && live.panel) ? live.panel : ({})
   readonly property var consts: (live && live.consts) ? live.consts : ({})
-  readonly property string channel: (live && live.channel) ? live.channel : "auto"
   readonly property bool glassOn: !live || live.on !== false
   readonly property bool animated: !!(live && live.animated)
+  readonly property int tubes: (live && typeof live.tubes === "number") ? live.tubes : 0
 
   // The phosphor the shader was actually compiled with — not the theme's
   // accent, not a guess. When AUTO resolved against a staged theme these are
@@ -79,15 +84,12 @@ Panel {
   readonly property color phosphor:
     (live && live.phosphor) ? live.phosphor : foreground
 
-  readonly property var channels: ["auto", "green", "amber", "white"]
-  readonly property int channelIndex: Math.max(0, channels.indexOf(channel))
 
   // The six service knobs that are natural 0..1 dials. The rest of the tube —
   // SCAN_STEP, BAND_H, TRACK_PERIOD, the colour grade — has ranges a knob would
   // lie about, so those stay on the command line rather than being squeezed
   // onto a dial that reads 40% and means four pixels.
   readonly property var serviceKnobs: [
-    { key: "SCAN",     label: "SCANLINE" },
     { key: "ABERR",    label: "CONVERGE" },
     { key: "FLICKER",  label: "FLICKER" },
     { key: "GLARE",    label: "GLARE" },
@@ -107,7 +109,8 @@ Panel {
 
   readonly property string heroMeta: {
     if (!installed) return "not wired into Hyprland yet"
-    var parts = [glassOn ? "glass on" : "glass lifted", "channel " + channel]
+    var parts = [glassOn ? "glass on" : "glass lifted"]
+    parts.push(tubes > 0 ? tubes + " tubes" : "no tubes — flat glass")
     if (animated) parts.push("clock running")
     return parts.join("  ·  ")
   }
@@ -131,11 +134,6 @@ Panel {
     crt("set " + name + " " + value.toFixed(3))
   }
 
-  function setChannel(index) {
-    var i = Math.max(0, Math.min(channels.length - 1, Math.round(index)))
-    crt("channel " + channels[i])
-  }
-
   function toggleGlass() {
     crt(glassOn ? "off" : "on")
   }
@@ -151,9 +149,8 @@ Panel {
   }
 
   function turnCursor(delta) {
-    if (cursor === 3) { setChannel(channelIndex + (delta > 0 ? 1 : -1)); return }
-    if (cursor < 3) {
-      var names = ["BARREL", "FADE", "TRACKING"]
+    if (cursor < 4) {
+      var names = ["BARREL", "FADE", "TRACKING", "SCANLINE"]
       var n = names[cursor]
       setKnob(n, Math.max(0, Math.min(1, panelValue(n, 0.5) + delta * 0.05)))
       return
@@ -347,7 +344,8 @@ Panel {
               model: [
                 { key: "BARREL",   label: "BARREL",   fallback: 0.55 },
                 { key: "FADE",     label: "FADE",     fallback: 0.64 },
-                { key: "TRACKING", label: "TRACKING", fallback: 0.60 }
+                { key: "TRACKING", label: "TRACKING", fallback: 0.60 },
+                { key: "SCANLINE", label: "SCANLINE", fallback: 0.22 }
               ]
 
               Knob {
@@ -366,31 +364,6 @@ Panel {
                 focused: root.cursor === index
                 value: root.panelValue(modelData.key, modelData.fallback)
                 onCommitted: function (v) { root.setKnob(modelData.key, v) }
-              }
-            }
-
-            // CHANNEL is detented, because a phosphor is a choice and not a
-            // quantity: it snaps to a position and reads out its name. AUTO
-            // sits at the bottom of the travel, where the set was tuned to
-            // whatever the aerial was pointing at.
-            Knob {
-              id: channelKnob
-              width: column.width / 4
-              height: implicitHeight
-              label: "CHANNEL"
-              tint: root.phosphor
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              readout: root.channel.toUpperCase()
-              focused: root.cursor === 3
-              value: root.channelIndex / (root.channels.length - 1)
-              onCommitted: function (v) {
-                root.setChannel(v * (root.channels.length - 1))
-                // Snap back to the detent immediately; the file watch will
-                // confirm it a moment later.
-                value = Qt.binding(function () {
-                  return root.channelIndex / (root.channels.length - 1)
-                })
               }
             }
           }
