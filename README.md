@@ -166,14 +166,15 @@ also flattens on its way out, so stopping it leaves a plain desktop rather than
 the last layout's rects bending whatever moved in. `CRT_TUBES_ANYWAY=1`
 overrides, for someone who has read this paragraph and disagrees.
 
-The geometry is not reimplemented here. `td-tubes`, in
-`omarchy-terminal-delight-theme`, already does the hard part — rotation
-transforms, per-monitor scale, layer surfaces, a whole-monitor budget, the
-disjointness invariant — and it carries a sourcing guard, so this calls its
-functions for their values without running its command line. That makes the
-tubes, for now, the one part of this plugin that wants the theme installed;
-without it the glass is flat and says so. Moving that registry in here is the
-open piece — it is not a colour scheme and does not belong to a theme.
+The geometry — rotation transforms, per-monitor scale, layer surfaces, the
+fullscreen occlusion rule, a whole-monitor budget — lives in
+`crt/tubes-geometry`, a **generated** copy of the terminal-delight theme's
+`td-tubes`, produced by `bin/sync-tubes-geometry` and changed no other way. The
+theme's file stays the single place that logic is edited; the plugin carries
+its own copy so it runs with no theme installed at all, and
+`bin/sync-tubes-geometry --check` says whether the copy has gone stale.
+`test/probe-fullscreen-layer` proves the copy against a stubbed compositor,
+occlusion rule included.
 
 The optics are a port of [terminal-delight](https://github.com/parker-brown-family/terminal-delight)'s
 own display stack, dial for dial.

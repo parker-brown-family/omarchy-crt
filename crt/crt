@@ -479,24 +479,27 @@ def write_passthrough():
 # must track the compositor or they must not be used at all, and there is no
 # guard that substitutes for watching.
 #
-# The geometry itself is not reimplemented here. td-tubes already does it —
-# rotation transforms, per-monitor scale, layer surfaces, the whole-monitor
-# budget, the disjointness invariant — and it carries a sourcing guard, so its
-# functions can be called for their values without running its command line.
+# The geometry itself is not reimplemented here and not fetched from anywhere
+# at runtime either. crt/tubes-geometry is a GENERATED copy of the theme's
+# td-tubes — rotation transforms, per-monitor scale, layer surfaces, the
+# fullscreen occlusion rule, the whole-monitor budget — produced by
+# bin/sync-tubes-geometry, which is the only way it changes. The theme's file
+# stays the single place the geometry is edited; the plugin stands alone.
+GEOMETRY = PLUGIN / "tubes-geometry"
 
 
 def td_tubes_block(passthrough=(), quiet_unfocused=True):
-    """The current rect block, or None when td-tubes is not installed.
+    """The current rect block, or None when the geometry cannot run.
 
-    td-tubes emits a `// <class>` comment on every rect line, which is what
+    The geometry emits a `// <class>` comment on every rect line, which is what
     lets the passthrough list be written in terms of window classes rather than
     indices into a list that changes every time a window opens.
     """
-    if not shutil.which("td-tubes"):
+    if not GEOMETRY.exists():
         return None
     r = subprocess.run(
         ["bash", "-c",
-         'source "$(command -v td-tubes)"; emit_block "$(cap "$(tubes_json)")"'],
+         f'source "{GEOMETRY}"; emit_block "$(cap "$(tubes_json)")"'],
         capture_output=True, text=True)
     if r.returncode != 0 or "#define TUBE_COUNT" not in r.stdout:
         return None
@@ -575,7 +578,7 @@ def tubes_once():
     st = load()
     block = td_tubes_block(st.get("passthrough", []), st.get("quietUnfocused", True))
     if block is None:
-        die("td-tubes is not installed — no rects to read (the glass stays flat)")
+        die(f"geometry missing at {GEOMETRY} — run bin/sync-tubes-geometry (glass stays flat)")
     write_tubes(block)
     apply(st)
     n = re.search(r"#define TUBE_COUNT\s+(\d+)", block)
@@ -588,7 +591,7 @@ def tubes_once():
 def tubes_watch():
     """Follow the compositor and keep the rects true until interrupted."""
     if td_tubes_block() is None:
-        die("td-tubes is not installed — nothing to watch with")
+        die(f"geometry missing at {GEOMETRY} — run bin/sync-tubes-geometry")
 
     sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
     rt = os.environ.get("XDG_RUNTIME_DIR")
