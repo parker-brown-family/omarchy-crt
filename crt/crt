@@ -6,6 +6,9 @@
     crt set SCAN 0.35 VIGN 0.2 service knobs take their raw shader names
     crt on / crt off           lift the glass off the screen
 
+    crt passthrough            surfaces handed back untouched (they draw
+    crt passthrough add <cls>  their own CRT — terminal-delight does)
+
     crt tubes                  give every visible surface its own tube, once
     crt tubes watch            and keep them true as windows and popups come
                                and go — without this the rects are a snapshot
@@ -144,6 +147,10 @@ def load():
         # Off. See the clock note in render() — this is the one default whose
         # cost is a red banner across the user's desktop.
         "animated": False,
+        # Surfaces that draw their own picture and must be handed back
+        # untouched. terminal-delight has a complete CRT per pane, so the
+        # glass would be applied to it twice.
+        "passthrough": ["terminal-delight"],
     }
     if KNOBS.exists():
         try:
@@ -159,6 +166,8 @@ def load():
             st["on"] = got["on"]
         if isinstance(got.get("animated"), bool):
             st["animated"] = got["animated"]
+        if isinstance(got.get("passthrough"), list):
+            st["passthrough"] = [x for x in got["passthrough"] if isinstance(x, str)]
     return st
 
 
@@ -316,6 +325,20 @@ def render(st, path=None):
                   "         Rendering flat glass instead — `crt tubes watch` "
                   "to keep them true.", file=sys.stderr)
         else:
+            # A block that predates TUBE_PASS — anything not written by this
+            # plugin, td-tubes' own output included — declares no such array,
+            # and the shader references it. Supply zeros rather than refusing:
+            # "nobody marked any surface for passthrough" is the correct
+            # reading of a block that has no opinion, and it keeps every
+            # existing writer working.
+            if ("TUBE_PASS" not in block
+                    and not re.search(r"#define TUBE_COUNT\s+0\b", block)):
+                n = int(re.search(r"#define TUBE_COUNT\s+(\d+)", block).group(1))
+                zeros = ", ".join(["0"] * n)
+                block = block.replace(
+                    "#endif",
+                    f"const int   TUBE_PASS[TUBE_COUNT] = int[TUBE_COUNT](\n"
+                    f"    {zeros}\n);\n#endif")
             text = re.sub(
                 r"(// ---- TUBE DATA[^\n]*\n).*?(// ---- END TUBE DATA ----)",
                 lambda m: m.group(1) + block.rstrip("\n") + "\n" + m.group(2),
@@ -451,8 +474,13 @@ def write_passthrough():
 # functions can be called for their values without running its command line.
 
 
-def td_tubes_block():
-    """The current rect block, or None when td-tubes is not installed."""
+def td_tubes_block(passthrough=()):
+    """The current rect block, or None when td-tubes is not installed.
+
+    td-tubes emits a `// <class>` comment on every rect line, which is what
+    lets the passthrough list be written in terms of window classes rather than
+    indices into a list that changes every time a window opens.
+    """
     if not shutil.which("td-tubes"):
         return None
     r = subprocess.run(
@@ -463,7 +491,21 @@ def td_tubes_block():
         return None
     # Strip td-tubes' own markers; render() supplies its own.
     body = re.sub(r"^// ---- TUBE DATA[^\n]*\n", "", r.stdout)
-    return re.sub(r"// ---- END TUBE DATA ----\n?$", "", body)
+    body = re.sub(r"// ---- END TUBE DATA ----\n?$", "", body)
+
+    n = int(re.search(r"#define TUBE_COUNT\s+(\d+)", body).group(1))
+    if n == 0:
+        return body
+
+    classes = re.findall(r"^\s*vec4\([^)]*\),?\s*//\s*(.+?)\s*$", body, re.M)
+    if len(classes) != n:
+        # No class comments to key on, so nothing can be opted out — which is
+        # the old behaviour, not a failure. Say nothing and carry on.
+        classes = [""] * n
+    flags = ", ".join("1" if c in passthrough else "0" for c in classes)
+    return body.replace(
+        "#endif",
+        f"const int   TUBE_PASS[TUBE_COUNT] = int[TUBE_COUNT](\n    {flags}\n);\n#endif")
 
 
 def watcher_alive():
@@ -487,11 +529,11 @@ def write_tubes(block):
 
 
 def tubes_once():
-    block = td_tubes_block()
+    st = load()
+    block = td_tubes_block(st.get("passthrough", []))
     if block is None:
         die("td-tubes is not installed — no rects to read (the glass stays flat)")
     write_tubes(block)
-    st = load()
     apply(st)
     n = re.search(r"#define TUBE_COUNT\s+(\d+)", block)
     print(f"{n.group(1) if n else '?'} tube(s)")
@@ -537,7 +579,7 @@ def tubes_watch():
 
     def refresh(why):
         nonlocal last
-        block = td_tubes_block()
+        block = td_tubes_block(load().get("passthrough", []))
         if block is None or block == last:
             return
         last = block
@@ -561,6 +603,13 @@ def tubes_watch():
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
                 name = line.decode("utf-8", "replace").split(">>", 1)[0]
+                # A reload re-reads the config and drops both runtime
+                # preconditions, so re-assert them there whether or not any
+                # surface actually moved.
+                if name == "configreloaded":
+                    st = load()
+                    preconditions(bool(st.get("animated")) and st["on"],
+                                  1 if last and "TUBE_COUNT 0" not in last else 0)
                 if name in WATCH_EVENTS:
                     refresh(name)
     finally:
@@ -719,24 +768,41 @@ def commit(st):
     save(st)
 
 
-def set_damage_tracking(animated):
-    """Hyprland asks to be told, and until it is told the motion does not run.
+def preconditions(animated, tube_count):
+    """Two compositor settings the glass does not work without.
 
-        Screen shader: Screen shader uses uniform 'time', which requires
-        debug:damage_tracking to be switched off.
+    THE CURSOR HAS TO RIDE THE SHADER. `cursor:no_hardware_cursors` defaults to
+    2, which lets Hyprland put the pointer on a hardware plane — composited by
+    the display controller, after and outside everything this shader does. The
+    picture then bends and the pointer does not, so what you see under the
+    cursor near a tile's corner is up to ~4% of the tile away from what you are
+    actually pointing at. It reads as a hover bug and it is not: it is the
+    cursor being the one thing on screen the glass never touched.
 
-    That red banner across the desktop is not a grumble about a choice already
-    made — it is Hyprland saying the clock will not repaint until damage
-    tracking is actually off. Leaving it unset gets you the worst of both: a
-    permanent error bar AND a tracking band that never sweeps. So the clock and
-    this setting move together, and turning the clock back off restores the
-    default (2) rather than leaving the whole desktop redrawing forever because
-    a knob was once turned up.
+    NO STALE PIXELS UNDER A GATHER. `debug:damage_tracking` must be 0 because
+    this shader reads neighbouring pixels — Hyprland repainting only the small
+    rect the cursor dirtied leaves the gather sampling last frame's pixels
+    around it, which reads as tearing under mouse movement specifically.
+
+    Damage tracking is wanted by two independent things — the clock and the
+    gather — so it is the OR of them, not either one's private setting. Getting
+    that wrong is silent: stopping the tracking band would have handed damage
+    tracking back while the tubes were still gathering through it.
+
+    Both are runtime-only, so a `hyprctl reload` drops them; the watch
+    re-asserts on configreloaded.
     """
-    val = "0" if animated else "2"
-    out = hyprctl("keyword", "debug:damage_tracking", val)
-    if out is not None and "non-legacy" in out:
-        hyprctl("eval", f"hl.config({{ debug = {{ damage_tracking = {val} }} }})")
+    want_damage = "0" if (animated or tube_count > 0) else "2"
+    want_cursor = "1" if tube_count > 0 else "2"
+    out = hyprctl("keyword", "debug:damage_tracking", want_damage)
+    legacy_gone = out is not None and "non-legacy" in out
+    if legacy_gone:
+        hyprctl("eval", f"hl.config({{ debug = {{ damage_tracking = {want_damage} }} }})")
+    else:
+        hyprctl("keyword", "cursor:no_hardware_cursors", want_cursor)
+        return
+    hyprctl("eval",
+            f"hl.config({{ cursor = {{ no_hardware_cursors = {want_cursor} }} }})")
 
 
 def apply(st):
@@ -747,7 +813,9 @@ def apply(st):
         return
     # Re-setting the same path is a no-op, so drop and re-set to force a
     # recompile of the file we just changed.
-    set_damage_tracking(bool(st.get("animated")) and st["on"])
+    n = re.search(r"#define TUBE_COUNT\s+(\d+)", out.read_text())
+    preconditions(bool(st.get("animated")) and st["on"],
+                  int(n.group(1)) if (n and st["on"]) else 0)
     set_shader(PASSTHROUGH)
     if st["on"]:
         set_shader(out)
@@ -851,6 +919,8 @@ def show(st):
         print(f"  {k:<10} {v:.2f}   {round(v * 100):>3d}%")
     print(f"  {'PHOSPHOR':<10} "
           f"{'from the staged theme' if ch else 'template default (no theme staged)'}")
+    if st.get("passthrough"):
+        print(f"  {'PASSTHRU':<10} " + ", ".join(st["passthrough"]))
     if st["service"]:
         print("\n  service panel:")
         for k in sorted(st["service"]):
@@ -884,6 +954,27 @@ def main(argv):
         return
     if cmd == "uninstall":
         uninstall()
+        return
+    if cmd == "passthrough":
+        st = load()
+        if not rest:
+            for c in st.get("passthrough", []):
+                print(f"  {c}")
+            if not st.get("passthrough"):
+                print("  (nothing — every surface gets the glass)")
+            return
+        verb, names = rest[0], rest[1:]
+        cur = list(st.get("passthrough", []))
+        if verb == "add":
+            cur += [n for n in names if n not in cur]
+        elif verb in ("rm", "remove"):
+            cur = [c for c in cur if c not in names]
+        else:
+            die("passthrough [add|rm] <window class>")
+        st["passthrough"] = cur
+        commit(st)
+        print("passthrough: " + (", ".join(cur) or "(nothing)"))
+        print("  run `crt tubes` (or let the watcher tick) to re-emit the rects")
         return
     if cmd == "tubes":
         if rest and rest[0] == "watch":

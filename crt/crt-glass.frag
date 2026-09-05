@@ -134,16 +134,27 @@ uniform int wl_output; // monitor id — one frag serves every monitor
 const vec4  TUBE_RECT[TUBE_COUNT] = vec4[TUBE_COUNT](vec4(0.0));
 const int   TUBE_MON[TUBE_COUNT]  = int[TUBE_COUNT](0);
 const float TUBE_CURV[TUBE_COUNT] = float[TUBE_COUNT](0.0);
+const int   TUBE_PASS[TUBE_COUNT] = int[TUBE_COUNT](0);
 #endif
 // ---- END TUBE DATA ----
 
-// TUBE_CURV is how a surface opts OUT without leaving a hole. A surface that
-// should not bow — terminal-delight, which warps its own panes — still needs to
-// CLAIM its pixels, because tube_at picks the first rect containing a pixel and
-// an unclaimed region falls through to whatever rect is underneath. Leaving such
-// a window out of the list is what tears it: it gets drawn through a neighbour's
-// map. So it gets a tube with curvature 0, which is the identity and draws no
-// bezel, and nothing else's map can reach it.
+// TUBE_CURV is how a surface opts out of the BOW without leaving a hole. A
+// surface that should not bend still needs to CLAIM its pixels, because
+// tube_at picks the first rect containing a pixel and an unclaimed region falls
+// through to whatever rect is underneath. Leaving such a window out of the list
+// is what tears it: it gets drawn through a neighbour's map. So it gets a tube
+// with curvature 0, which is the identity and draws no bezel, and nothing
+// else's map can reach it. That is what a bar or a tray wants — flat, immune to
+// its neighbours, and still sitting behind the same glass as everything else.
+//
+// TUBE_PASS is the OTHER opt-out, and it is a different question. Curvature
+// reaches exactly one thing, tube_map; the scanlines, the vignette, the centre
+// bloom, the aberration, the glare, the specular and the tracking band all key
+// off the tube-local coordinate and apply whatever the curvature is. A surface
+// that draws its own CRT — terminal-delight, which has all of those per pane —
+// was therefore getting a second complete set on top of its own: two sets of
+// scanlines, two vignettes, two bands. TUBE_PASS = 1 means hand the pixels back
+// untouched. `crt passthrough` keeps the list.
 
 // Which tube owns this pixel, or -1 for bare desktop. td-tubes emits the list
 // most-recently-focused first and the first hit wins, so a window stacked over
@@ -293,6 +304,16 @@ void main() {
     vec2  uv   = tube_map(tube, uvs, res, tedge, L);
     edge       = min(edge, tedge);
     if (edge <= 0.0) { fragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+
+    // A surface that draws its own picture gets it back unread. This has to
+    // come before every effect below rather than being subtracted from each,
+    // because the point is that NOTHING here reaches it.
+#if TUBE_COUNT > 0
+    if (tube >= 0 && TUBE_PASS[tube] == 1) {
+        fragColor = vec4(texture(tex, uv).rgb, 1.0);
+        return;
+    }
+#endif
 
     vec2  tsize = tube_size(tube, res);
 
