@@ -560,6 +560,22 @@ check "the template ships FX_COUNT 0" \
   "$(grep -c '^#define FX_COUNT 0' "$TEMPLATE")" "1"
 check "the template ships IGNITION at 0.00" "$(constof "$TEMPLATE" IGNITION)" "0.00"
 
+# A FRESH INSTALL SHIPS IGNITION OFF. Not just the template constant — the whole
+# path: no knobs.json at all, the way a clean `omarchy plugin add` arrives. The
+# toggle must default off and render the effect inert, or a first launch would
+# animate every window uninvited. This is the guarantee a shipping default has
+# to keep, so it is asserted end to end, not assumed from the const above.
+rm -rf "$XDG_STATE_HOME/omarchy/crt"
+stage_theme "#67F454" "#DFE2E3"
+"$CRT" render >/dev/null 2>&1
+check "a pristine install (no knobs.json) has ignition OFF in live.json" \
+  "$(grep -c '"ignition": false' "$LIVE")" "1"
+check "and renders the IGNITION const inert at 0.00" "$(constof "$SHADER" IGNITION)" "0.0"
+check "and carries no fx block" \
+  "$(grep -oE '^#define FX_COUNT [0-9]+' "$SHADER")" "#define FX_COUNT 0"
+check "crt ignition (no arg) reports off on a pristine install" \
+  "$("$CRT" ignition 2>&1)" "screen ignition off"
+
 CRTRS="$REPO/../terminal-delight/app/src/crt.rs"
 if [[ -f "$CRTRS" ]]; then
   rs_ms="$(awk -F'=' '/IGNITION_MS: u64/ {gsub(/[^0-9]/,"",$2); print $2; exit}' "$CRTRS")"
