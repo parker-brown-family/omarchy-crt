@@ -139,7 +139,24 @@ can appear in a list written before they opened — and each one comes up bent
 over whatever window it happens to cover. Watching turns that into an
 `openlayer` event and a rect.
 
-`crt render` therefore **refuses to splice rects while nothing is keeping them
+### The screen you are not looking at
+
+A monitor with nothing changing on it gets no frames — Hyprland renders on
+damage, not on vsync — so anything the clock drives stops where it was. The
+tracking band strands mid-screen and stays there until something else repaints
+that monitor, which behind a bar clock reading `HH:mm` can be most of a minute.
+
+There is no event for "this monitor stopped rendering" and no way to ask, so the
+rule is the one thing Hyprland does tell you: **tubes on a monitor without focus
+go quiet.** The band and the flicker stop; the scanlines, curve and vignette
+stay, because they do not move and a frozen frame of them is identical to a live
+one. Turn it off with `crt quiet off`.
+
+What makes the wipe possible at all is that you cannot paint a correction onto a
+monitor that has stopped rendering — but *changing the shader is what causes a
+render*. The swap carries its own frame.
+
+`crt render` **refuses to splice rects while nothing is keeping them
 true** and renders flat glass instead, which is merely less pretty. The watcher
 also flattens on its way out, so stopping it leaves a plain desktop rather than
 the last layout's rects bending whatever moved in. `CRT_TUBES_ANYWAY=1`

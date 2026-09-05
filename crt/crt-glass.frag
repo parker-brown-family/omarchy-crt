@@ -135,6 +135,7 @@ const vec4  TUBE_RECT[TUBE_COUNT] = vec4[TUBE_COUNT](vec4(0.0));
 const int   TUBE_MON[TUBE_COUNT]  = int[TUBE_COUNT](0);
 const float TUBE_CURV[TUBE_COUNT] = float[TUBE_COUNT](0.0);
 const int   TUBE_PASS[TUBE_COUNT] = int[TUBE_COUNT](0);
+const int   TUBE_QUIET[TUBE_COUNT] = int[TUBE_COUNT](0);
 #endif
 // ---- END TUBE DATA ----
 
@@ -155,6 +156,14 @@ const int   TUBE_PASS[TUBE_COUNT] = int[TUBE_COUNT](0);
 // was therefore getting a second complete set on top of its own: two sets of
 // scanlines, two vignettes, two bands. TUBE_PASS = 1 means hand the pixels back
 // untouched. `crt passthrough` keeps the list.
+//
+// TUBE_QUIET = 1 stops everything the CLOCK drives on that tube — the band
+// and the flicker — while leaving the still optics alone. It is set for tubes
+// on a monitor that does not have focus, because such a monitor usually stops
+// being rendered at all, and a shader whose time never advances leaves the
+// band stranded mid-screen until something else repaints. Scanlines are
+// deliberately NOT covered: they do not move, so a frozen frame of them looks
+// exactly like a live one, and removing them would be the only visible change.
 
 // Which tube owns this pixel, or -1 for bare desktop. td-tubes emits the list
 // most-recently-focused first and the first hit wins, so a window stacked over
@@ -321,12 +330,18 @@ void main() {
     // A surface that draws its own picture gets it back unread. This has to
     // come before every effect below rather than being subtracted from each,
     // because the point is that NOTHING here reaches it.
+    bool quiet = false;
 #if TUBE_COUNT > 0
     if (tube >= 0 && TUBE_PASS[tube] == 1) {
         fragColor = vec4(texture(tex, uv).rgb, 1.0);
         return;
     }
+    quiet = tube >= 0 && TUBE_QUIET[tube] == 1;
 #endif
+    // Everything the clock drives is off on a quiet tube. The flicker scales
+    // the scanlines and the vignette rather than the picture, so freezing it at
+    // 1.0 is the same as it never having fired.
+    if (quiet) fl = 1.0;
 
     vec2  tsize = tube_size(tube, res);
 
@@ -379,7 +394,8 @@ void main() {
 
     // the rolling tracking band, plus its band-local scanline pressure
     float darken = 0.0;
-    col += tracking_add(L.y * tsize.y, tsize.y, t + tube_phase(tube), darken);
+    if (!quiet)
+        col += tracking_add(L.y * tsize.y, tsize.y, t + tube_phase(tube), darken);
     col *= 1.0 - darken * 0.5;
 
     col += glare_add(L);

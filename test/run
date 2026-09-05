@@ -444,6 +444,16 @@ echo $$ >"$XDG_STATE_HOME/omarchy/crt/watcher.pid"
 check "a real block is spliced in" \
   "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$SHADER")" "#define TUBE_COUNT 2"
 check "and the result still compiles" "$?" "0"
+
+# The fixture above declares neither TUBE_PASS nor TUBE_QUIET, and the shader
+# references both. Zeros are supplied rather than the block being refused,
+# because a writer with no opinion about passthrough or about which monitor has
+# focus correctly means "none of them" — and refusing would break every writer
+# that predates either array.
+for arr in TUBE_PASS TUBE_QUIET; do
+  check "$arr is supplied for a block that declares none" \
+    "$(grep -c "int   $arr\[TUBE_COUNT\]" "$SHADER")" "1"
+done
 check "live.json reports the tube count" \
   "$(grep -c '\"tubes\": 2' "$LIVE")" "1"
 

@@ -6,6 +6,7 @@
     crt set SCAN 0.35 VIGN 0.2 service knobs take their raw shader names
     crt on / crt off           lift the glass off the screen
 
+    crt quiet on|off           stop the band on monitors without focus
     crt passthrough            surfaces handed back untouched (they draw
     crt passthrough add <cls>  their own CRT — terminal-delight does)
 
@@ -153,6 +154,10 @@ def load():
         # untouched. terminal-delight has a complete CRT per pane, so the
         # glass would be applied to it twice.
         "passthrough": ["terminal-delight"],
+        # Stop the clock on monitors that do not have focus. A monitor with
+        # nothing changing on it gets no frames, so the band strands
+        # mid-screen until something else repaints it.
+        "quietUnfocused": True,
     }
     if KNOBS.exists():
         try:
@@ -170,6 +175,8 @@ def load():
             st["animated"] = got["animated"]
         if isinstance(got.get("passthrough"), list):
             st["passthrough"] = [x for x in got["passthrough"] if isinstance(x, str)]
+        if isinstance(got.get("quietUnfocused"), bool):
+            st["quietUnfocused"] = got["quietUnfocused"]
     return st
 
 
@@ -333,14 +340,16 @@ def render(st, path=None):
             # "nobody marked any surface for passthrough" is the correct
             # reading of a block that has no opinion, and it keeps every
             # existing writer working.
-            if ("TUBE_PASS" not in block
-                    and not re.search(r"#define TUBE_COUNT\s+0\b", block)):
+            if not re.search(r"#define TUBE_COUNT\s+0\b", block):
                 n = int(re.search(r"#define TUBE_COUNT\s+(\d+)", block).group(1))
                 zeros = ", ".join(["0"] * n)
-                block = block.replace(
-                    "#endif",
-                    f"const int   TUBE_PASS[TUBE_COUNT] = int[TUBE_COUNT](\n"
-                    f"    {zeros}\n);\n#endif")
+                for name in ("TUBE_PASS", "TUBE_QUIET"):
+                    if name in block:
+                        continue
+                    block = block.replace(
+                        "#endif",
+                        f"const int   {name}[TUBE_COUNT] = int[TUBE_COUNT](\n"
+                        f"    {zeros}\n);\n#endif")
             text = re.sub(
                 r"(// ---- TUBE DATA[^\n]*\n).*?(// ---- END TUBE DATA ----)",
                 lambda m: m.group(1) + block.rstrip("\n") + "\n" + m.group(2),
@@ -476,7 +485,7 @@ def write_passthrough():
 # functions can be called for their values without running its command line.
 
 
-def td_tubes_block(passthrough=()):
+def td_tubes_block(passthrough=(), quiet_unfocused=True):
     """The current rect block, or None when td-tubes is not installed.
 
     td-tubes emits a `// <class>` comment on every rect line, which is what
@@ -505,9 +514,41 @@ def td_tubes_block(passthrough=()):
         # the old behaviour, not a failure. Say nothing and carry on.
         classes = [""] * n
     flags = ", ".join("1" if c in passthrough else "0" for c in classes)
+
+    # A tube on a monitor without focus goes quiet: that monitor usually stops
+    # being rendered, and a clock that never advances leaves the band stranded.
+    # An unknown focus silences nothing — see focused_monitor().
+    mons = re.search(r"TUBE_MON\[TUBE_COUNT\]\s*=\s*\w+\[TUBE_COUNT\]\(([^)]*)\)",
+                     body, re.S)
+    fm = focused_monitor() if quiet_unfocused else None
+    if mons and fm is not None:
+        ids = [v.strip() for v in mons.group(1).split(",")]
+        quiet = ", ".join("0" if v == str(fm) else "1" for v in ids)
+    else:
+        quiet = ", ".join(["0"] * n)
+
     return body.replace(
         "#endif",
-        f"const int   TUBE_PASS[TUBE_COUNT] = int[TUBE_COUNT](\n    {flags}\n);\n#endif")
+        f"const int   TUBE_PASS[TUBE_COUNT] = int[TUBE_COUNT](\n    {flags}\n);\n"
+        f"const int   TUBE_QUIET[TUBE_COUNT] = int[TUBE_COUNT](\n    {quiet}\n);\n#endif")
+
+
+def focused_monitor():
+    """Which monitor has focus, or None when it cannot be established.
+
+    None is not "monitor 0" — it means nobody said, and the caller leaves every
+    tube performing rather than silencing the wrong screen on a guess.
+    """
+    out = hyprctl("monitors", "-j")
+    if not out:
+        return None
+    try:
+        for m in json.loads(out):
+            if m.get("focused"):
+                return int(m["id"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    return None
 
 
 def watcher_alive():
@@ -532,7 +573,7 @@ def write_tubes(block):
 
 def tubes_once():
     st = load()
-    block = td_tubes_block(st.get("passthrough", []))
+    block = td_tubes_block(st.get("passthrough", []), st.get("quietUnfocused", True))
     if block is None:
         die("td-tubes is not installed — no rects to read (the glass stays flat)")
     write_tubes(block)
@@ -581,7 +622,9 @@ def tubes_watch():
 
     def refresh(why):
         nonlocal last
-        block = td_tubes_block(load().get("passthrough", []))
+        stw = load()
+        block = td_tubes_block(stw.get("passthrough", []),
+                               stw.get("quietUnfocused", True))
         if block is None:
             return
         key = block_key(block)
@@ -840,13 +883,19 @@ def _tube_rows(block):
                       block, re.S)
         return [v.strip() for v in m.group(1).split(",")] if m else []
     mons, curvs, passes = ints("TUBE_MON"), ints("TUBE_CURV"), ints("TUBE_PASS")
+    quiets = ints("TUBE_QUIET")
     if not rects or len(mons) != len(rects):
         return None
     if len(curvs) != len(rects):
         curvs = ["0"] * len(rects)
     if len(passes) != len(rects):
         passes = ["0"] * len(rects)
-    return [(mons[i], *rects[i], curvs[i], passes[i]) for i in range(len(rects))]
+    if len(quiets) != len(rects):
+        quiets = ["0"] * len(rects)
+    # quiets is in the row, so moving focus to another monitor changes the key
+    # and earns a rebuild — which is the frame that paints the wipe.
+    return [(mons[i], *rects[i], curvs[i], passes[i], quiets[i])
+            for i in range(len(rects))]
 
 
 def block_key(block):
@@ -1029,6 +1078,16 @@ def main(argv):
         return
     if cmd == "uninstall":
         uninstall()
+        return
+    if cmd == "quiet":
+        st = load()
+        if rest:
+            st["quietUnfocused"] = rest[0] not in ("off", "0", "false")
+            commit(st)
+        print("quiet on unfocused monitors: "
+              + ("on" if st.get("quietUnfocused", True) else "off"))
+        if rest:
+            print("  run `crt tubes` (or let the watcher tick) to re-emit")
         return
     if cmd == "passthrough":
         st = load()
