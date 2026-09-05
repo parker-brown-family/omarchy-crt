@@ -820,6 +820,7 @@ def tubes_watch():
 
     def refresh(why, data=""):
         nonlocal last, last_fx, addr_rows, fx
+        t_enter = _time.monotonic()   # for the latency probe: event -> swap done
         stw = load()
         block, rows = td_tubes_snapshot(stw.get("passthrough", []),
                                         stw.get("quietUnfocused", True))
@@ -874,6 +875,12 @@ def tubes_watch():
         n = re.search(r"#define TUBE_COUNT\s+(\d+)", block)
         note = f"  fx={len(fx)}" if (fx or last_fx) else ""
         print(f"crt: {n.group(1) if n else '?'} tube(s){note}  <- {why}", flush=True)
+        # The latency probe reads this: milliseconds from entering refresh (an
+        # event just arrived) to the swap being live — the delay a viewer waits
+        # before an arc appears, dominated by the geometry snapshot and the
+        # compile, and what FX_LEAD is tuned against.
+        if os.environ.get("CRT_FX_TIME") and why in ("openwindow", "closewindow"):
+            print(f"crt: fxtime {why} {(_time.monotonic() - t_enter) * 1000:.0f}", flush=True)
 
     print(f"crt: watching {sock_path} (ctrl-c to stop)", flush=True)
     refresh("start")
