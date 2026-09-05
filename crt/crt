@@ -409,20 +409,23 @@ def render(st, path=None, validate=True):
     # validates its FIRST render of a session, and every user knob change (`crt
     # set`) goes through the full check, so a systemic breakage is still caught
     # where untrusted values actually enter.
-    if validate and shutil.which("glslangValidator"):
-        with tempfile.NamedTemporaryFile("w", suffix=".frag", delete=False) as f:
-            f.write(text)
-            probe = f.name
-        try:
-            r = subprocess.run(["glslangValidator", probe],
-                               capture_output=True, text=True)
-            if r.returncode != 0:
-                die("that does not compile — nothing applied\n" + r.stdout + r.stderr)
-        finally:
-            os.unlink(probe)
-    else:
-        print("warning: glslangValidator not installed; applying unvalidated",
-              file=sys.stderr)
+    if validate:
+        if shutil.which("glslangValidator"):
+            with tempfile.NamedTemporaryFile("w", suffix=".frag", delete=False) as f:
+                f.write(text)
+                probe = f.name
+            try:
+                r = subprocess.run(["glslangValidator", probe],
+                                   capture_output=True, text=True)
+                if r.returncode != 0:
+                    die("that does not compile — nothing applied\n" + r.stdout + r.stderr)
+            finally:
+                os.unlink(probe)
+        else:
+            print("warning: glslangValidator not installed; applying unvalidated",
+                  file=sys.stderr)
+    # validate=False is the watch's hot path deliberately skipping the check — not
+    # a missing tool, so it says nothing.
 
     out.write_text(text)
     if out == SHADER:
@@ -920,14 +923,17 @@ def tubes_watch():
                 print(f"crt: (no change)  <- {why}", flush=True)
             return
         last, last_fx = key, sigfx
+        t_snap = _time.monotonic()
         write_tubes(block)
         write_fx(fx, now)
         apply(load(), validate=validate)
         n = re.search(r"#define TUBE_COUNT\s+(\d+)", block)
         note = f"  fx={len(fx)}" if (fx or last_fx) else ""
         print(f"crt: {n.group(1) if n else '?'} tube(s){note}  <- {why}", flush=True)
-        if os.environ.get("CRT_FX_TIME") and (open_addrs or close_addrs):
-            print(f"crt: fxtime {why} {(_time.monotonic() - t_enter) * 1000:.0f}", flush=True)
+        if os.environ.get("CRT_FX_TIME"):
+            print(f"crt: fxtime {why} total={(_time.monotonic() - t_enter) * 1000:.0f} "
+                  f"snap={(t_snap - t_enter) * 1000:.0f} apply={(_time.monotonic() - t_snap) * 1000:.0f}",
+                  flush=True)
 
     print(f"crt: watching {sock_path} (ctrl-c to stop)", flush=True)
     build(set(), set(), "start", validate=True)
@@ -953,8 +959,14 @@ def tubes_watch():
             if dirty and deadline is not None:
                 waits.append(deadline - now)
             if fx:
-                oldest = min(e["t0"] for e in fx.values())
-                waits.append(oldest + fx_dur + FX_PAD - now)
+                # Wait for the LAST arc to finish, not the first. Expired arcs
+                # left in the block cost nothing — the shader skips any whose
+                # ft >= 1 — so there is no reason to recompile as each one ends.
+                # One rebuild when they are all done clears the block and drops
+                # the clock; that turns a stack of N arcs from N tail-compiles
+                # into one.
+                latest = max(e["t0"] for e in fx.values())
+                waits.append(latest + fx_dur + FX_PAD - now)
             timeout = max(0.0, min(waits)) if waits else None
             ready, _, _ = _select.select([s], [], [], timeout)
             now = _time.monotonic()
@@ -974,6 +986,7 @@ def tubes_watch():
                     if name == "configreloaded":
                         last = None
                         dirty = True
+                        reset_preconditions()   # reload dropped them at runtime
                     if name in WATCH_EVENTS:
                         if name == "openwindow":
                             open_pending.add(norm_addr(data.split(",", 1)[0]))
@@ -993,9 +1006,10 @@ def tubes_watch():
                 dirty, first_pending, deadline = False, None, None
                 build(o, c, "burst")
             elif fx:
-                oldest = min(e["t0"] for e in fx.values())
-                if now >= oldest + fx_dur + FX_PAD - 0.002:
-                    # The arc is over: swap the still glass back and drop the clock.
+                latest = max(e["t0"] for e in fx.values())
+                if now >= latest + fx_dur + FX_PAD - 0.002:
+                    # Every arc is done: one rebuild swaps the still glass back
+                    # and drops the clock (build() prunes them all at once).
                     build(set(), set(), "fx-expiry")
     finally:
         flatten()
@@ -1169,7 +1183,21 @@ def commit(st):
     save(st)
 
 
-def preconditions(animated, tube_count):
+# Last damage/cursor tier actually pushed to Hyprland, so an unchanged rebuild
+# can skip re-asserting them — the calls are expensive under a tier-0 redraw. A
+# config reload drops the runtime values, so the watch resets this there.
+_PRECOND = {"damage": None, "cursor": None}
+
+# Which slot the compositor is showing, tracked so swap_in need not query it.
+_LIVE_SLOT = None
+
+
+def reset_preconditions():
+    _PRECOND["damage"] = None
+    _PRECOND["cursor"] = None
+
+
+def preconditions(animated, tube_count, force=False):
     """Two compositor settings the glass does not work without.
 
     THE CURSOR HAS TO RIDE THE SHADER. `cursor:no_hardware_cursors` defaults to
@@ -1207,15 +1235,23 @@ def preconditions(animated, tube_count):
     else:
         want_damage = "2"
     want_cursor = "1" if tube_count > 0 else "2"
+    # Skip when nothing changed. These two settings hold across a whole run of
+    # arcs (damage stays 0 while any arc is live, the cursor stays software
+    # while any tube exists), so re-asserting them on every rebuild spent three
+    # hyprctl round trips for nothing — and under tier 0 each of those round
+    # trips is contended against a full-screen redraw, ballooning from ~6 ms to
+    # tens or hundreds. `force` re-asserts anyway, for the config-reload race
+    # (see apply): a reload drops these at runtime and the cache would not know.
+    if not force and _PRECOND["damage"] == want_damage and _PRECOND["cursor"] == want_cursor:
+        return
     out = hyprctl("keyword", "debug:damage_tracking", want_damage)
     legacy_gone = out is not None and "non-legacy" in out
     if legacy_gone:
         hyprctl("eval", f"hl.config({{ debug = {{ damage_tracking = {want_damage} }} }})")
+        hyprctl("eval", f"hl.config({{ cursor = {{ no_hardware_cursors = {want_cursor} }} }})")
     else:
         hyprctl("keyword", "cursor:no_hardware_cursors", want_cursor)
-        return
-    hyprctl("eval",
-            f"hl.config({{ cursor = {{ no_hardware_cursors = {want_cursor} }} }})")
+    _PRECOND["damage"], _PRECOND["cursor"] = want_damage, want_cursor
 
 
 def swap_in(built):
@@ -1230,11 +1266,19 @@ def swap_in(built):
     Two slots holding identical bytes solve it: write the build output to
     whichever slot is not live, point at that, and Hyprland compiles the new
     path and swaps. There is no moment where the desktop is unglassed.
+
+    Which slot is live is tracked in memory rather than queried, because the
+    getoption round trip is contended against a tier-0 redraw like every other.
+    The first swap of a session asks Hyprland once; after that we know, because
+    we are the only writer.
     """
-    now = live_shader()
-    slot = SLOTS[1] if now == str(SLOTS[0]) else SLOTS[0]
+    global _LIVE_SLOT
+    if _LIVE_SLOT is None:
+        _LIVE_SLOT = live_shader()
+    slot = SLOTS[1] if _LIVE_SLOT == str(SLOTS[0]) else SLOTS[0]
     slot.write_bytes(built.read_bytes())
     set_shader(slot)
+    _LIVE_SLOT = str(slot)
 
 
 def _tube_rows(block):
@@ -1311,12 +1355,18 @@ def apply(st, validate=True):
     # preconditions AFTER the first assertion has landed but before (or as)
     # the shader compiles — the compile then sees the wrong damage tier and
     # raises the sticky red banner even though the value is corrected a
-    # moment later. Restating after the swap means a late reset loses.
-    txt2 = out.read_text()
-    n2 = re.search(r"#define TUBE_COUNT\s+(\d+)", txt2)
-    anim2 = re.search(r"^#define ANIMATED\s+([01])", txt2, re.M)
-    clock_on2 = bool(anim2 and anim2.group(1) == "1") and st["on"]
-    preconditions(clock_on2, int(n2.group(1)) if (n2 and st["on"]) else 0)
+    # moment later. Restating after the swap means a late reset loses. This
+    # second assert is FORCED (past the skip-if-unchanged cache) but ONLY on the
+    # full path (validate=True: CLI, install, startup). On the watch's hot path
+    # the cache already made the first call a no-op when the tier held, and
+    # paying a forced round trip per arc is exactly the contention being removed;
+    # a reload there is handled by reset_preconditions() on configreloaded.
+    if validate:
+        txt2 = out.read_text()
+        n2 = re.search(r"#define TUBE_COUNT\s+(\d+)", txt2)
+        anim2 = re.search(r"^#define ANIMATED\s+([01])", txt2, re.M)
+        clock_on2 = bool(anim2 and anim2.group(1) == "1") and st["on"]
+        preconditions(clock_on2, int(n2.group(1)) if (n2 and st["on"]) else 0, force=True)
     # A banner the race above already latched does not clear itself: nothing
     # re-evaluates it, and the restated tier only stops the NEXT compile from
     # complaining. `hyprctl reload` was long believed the only way to take it
@@ -1325,23 +1375,26 @@ def apply(st, validate=True):
     # raised it from our compiles, so only then is the banner ours to close —
     # other error classes belong to hypr-error-watch, which toasts them from
     # its own probes and never by reading the bar.
-    if clock_on2:
+    # Clearing the red banner and reading configerrors are the full path's job.
+    # On the hot path the compile already saw tier 0 (preconditions set it before
+    # the swap), so no banner is raised and there is nothing to clear — and each
+    # of these is one more contended round trip per arc, which is the whole cost
+    # being cut here.
+    if validate and clock_on:
         hyprctl("seterror", "disable")
-    # The forensic line. The error bar is raised at compile time and logged
-    # nowhere, so a banner photographed hours later has nothing to subpoena.
-    # This names every compile we cause — clock state, tier, tube count, with
-    # a wall clock — so a picture of the bar plus its timestamp convicts one
-    # specific swap, or acquits all of ours. `animated` here is the RENDERED
-    # clock, so an ignition arc (which forces it on for 0.3 s while the stored
-    # flag stays off) shows honestly as animated=1 for exactly those frames.
+    # The forensic line names every compile we cause — clock state, tier, tube
+    # and fx count, with a wall clock — so a picture of the banner plus its
+    # timestamp convicts one specific swap. `animated` is the RENDERED clock, so
+    # an arc (which forces it on while the stored flag stays off) reads honestly.
     import datetime as _dt
-    fxn = re.search(r"#define FX_COUNT\s+(\d+)", txt2)
+    fxn = re.search(r"#define FX_COUNT\s+(\d+)", txt)
     print(f"crt: apply {_dt.datetime.now():%H:%M:%S} "
-          f"animated={1 if clock_on2 else 0} on={int(st['on'])} "
-          f"tubes={n2.group(1) if n2 else 0} fx={fxn.group(1) if fxn else 0}", flush=True)
-    errs = (hyprctl("configerrors") or "").strip()
-    if errs and "no errors" not in errs:
-        print(errs, file=sys.stderr)
+          f"animated={1 if clock_on else 0} on={int(st['on'])} "
+          f"tubes={n.group(1) if n else 0} fx={fxn.group(1) if fxn else 0}", flush=True)
+    if validate:
+        errs = (hyprctl("configerrors") or "").strip()
+        if errs and "no errors" not in errs:
+            print(errs, file=sys.stderr)
 
 
 # -------------------------------------------------------------------- install
