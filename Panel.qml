@@ -94,7 +94,12 @@ Panel {
     { key: "FLICKER",  label: "FLICKER" },
     { key: "GLARE",    label: "GLARE" },
     { key: "SPECULAR", label: "ROOM LIGHT" },
-    { key: "JIGGLE",   label: "JIGGLE" }
+    { key: "JIGGLE",   label: "JIGGLE" },
+    // IGNITION: how brightly a tube flashes as its window opens and closes.
+    // 0 is off (shipped); above 0 both halves play. Unlike the motion knobs it
+    // never turns the steady-state clock on — the flash lights its own clock
+    // for the third of a second it lasts and no longer.
+    { key: "IGNITION", label: "IGNITION" }
   ]
 
   function panelValue(key, fallback) {

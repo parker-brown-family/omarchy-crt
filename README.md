@@ -54,10 +54,20 @@ keys work when the tray has focus: left and right pick a knob, up and down turn
 it.
 
 There is no phosphor dial, deliberately — see the top of this file. Behind
-**SERVICE PANEL** are five more: convergence, flicker, glare, room light,
-jiggle. The rest of the tube has ranges a dial would lie about (scanline pitch
-in pixels, band height, rest seconds, the colour grade), so those live on the
-command line.
+**SERVICE PANEL** are six more: convergence, flicker, glare, room light,
+jiggle, and **ignition**. The rest of the tube has ranges a dial would lie about
+(scanline pitch in pixels, band height, rest seconds, the colour grade), so
+those live on the command line.
+
+**IGNITION** is the one that does something new: turn it up and a tube flashes as
+its window opens — the phosphor floods in, collapses to a scan line, and pinches
+to a star the terminal rises behind — and runs that arc in reverse as the window
+closes, borrowed dial for dial from Terminal Delight's own panes. It flashes in
+the theme's phosphor, lasts a third of a second, and ships at **0**: a clean
+install behaves exactly as before until you ask for it. Terminal Delight windows
+never double-flash — they play their own. The effect follows window events, so it
+needs the tube watcher running (the same one the curve already needs); `crt
+doctor` says so if you turn it up without one.
 
 ## The command line
 

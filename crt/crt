@@ -980,6 +980,22 @@ def conflicts():
         out.append(("note", "hypr.crt is wired into hyprland.lua",
                     "`crt install` has been run. `crt uninstall` takes it back out."))
 
+    # The ignition knob is only as alive as the two things it rides on: a watch
+    # to catch window events, and geometry new enough to name windows by address.
+    # A knob turned up over either gap does nothing, silently — the exact failure
+    # a control that cannot act is worse than no control at all.
+    if ignition_level(load()) > 0.0:
+        if not watcher_alive():
+            out.append(("fight", "IGNITION is set but no tube watcher is running",
+                        "The flash rides the watch that follows window events — with\n"
+                        "    no watcher it never fires. Start it:\n"
+                        "    systemctl --user start crt-tubes.service"))
+        if GEOMETRY.exists() and "addr:" not in GEOMETRY.read_text():
+            out.append(("reload", "IGNITION is set but the tube geometry predates window addresses",
+                        "Without an address per rect a closing window cannot be matched\n"
+                        "    to the tube that vanished, so the flash stays dark. Refresh it:\n"
+                        "    bin/sync-tubes-geometry"))
+
     return out
 
 
