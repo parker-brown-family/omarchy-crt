@@ -514,6 +514,17 @@ echo $$ >"$PIDFILE"              # this shell IS running
 check "a live watcher lets the rects through" \
   "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$SHADER")" "#define TUBE_COUNT 2"
 
+# The gather never needed the dearest damage tier. 0 redraws everything every
+# frame and is the CLOCK's price; a still glass with tubes needs only tier 1 —
+# any change repaints the whole monitor (so the gather never reads a stale
+# neighbour), and an idle monitor draws nothing. Inherited doctrine paid 0 for
+# what 1 buys, and the user asked for damage tracking back by name.
+"$CRT" set TRACKING 0 FLICKER 0 JIGGLE 0 >/dev/null 2>&1   # a STILL glass
+check "still glass with tubes takes damage tier 1, not 0" "$(cat "$DAMAGE_STATE")" "1"
+"$CRT" set TRACKING 0.5 >/dev/null 2>&1
+check "and the clock still commands tier 0 when it runs" "$(cat "$DAMAGE_STATE")" "0"
+"$CRT" set TRACKING 0 >/dev/null 2>&1
+
 rm -f "$PIDFILE"
 CRT_TUBES_ANYWAY=1 "$CRT" render >/dev/null 2>&1
 check "and there is an override for someone who has read the reason" \

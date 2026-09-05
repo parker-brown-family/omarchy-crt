@@ -843,15 +843,27 @@ def preconditions(animated, tube_count):
     rect the cursor dirtied leaves the gather sampling last frame's pixels
     around it, which reads as tearing under mouse movement specifically.
 
-    Damage tracking is wanted by two independent things — the clock and the
-    gather — so it is the OR of them, not either one's private setting. Getting
-    that wrong is silent: stopping the tracking band would have handed damage
-    tracking back while the tubes were still gathering through it.
+    Damage tracking has three tiers, and the gather does not need the dearest
+    one. 0 redraws everything every frame — the price the clock demands, and
+    the one the red banner names. 1 redraws the WHOLE MONITOR whenever
+    anything on it changes, and nothing when nothing does: a damaged frame is
+    repainted entire, so the gather never samples a stale neighbour, while an
+    idle monitor draws no frames at all. That is everything the tubes need.
+    The doctrine inherited from td-tubes set 0 for the gather, paying the
+    every-frame price for a correctness that tier 1 already buys.
 
-    Both are runtime-only, so a `hyprctl reload` drops them; the watch
-    re-asserts on configreloaded.
+    So: the clock costs 0 (Hyprland insists, in red, across the desktop), a
+    still glass with tubes costs 1, and bare glass costs nothing at all.
+
+    All runtime-only, so a `hyprctl reload` drops them; the watch re-asserts
+    on configreloaded.
     """
-    want_damage = "0" if (animated or tube_count > 0) else "2"
+    if animated:
+        want_damage = "0"
+    elif tube_count > 0:
+        want_damage = "1"
+    else:
+        want_damage = "2"
     want_cursor = "1" if tube_count > 0 else "2"
     out = hyprctl("keyword", "debug:damage_tracking", want_damage)
     legacy_gone = out is not None and "non-legacy" in out
@@ -948,6 +960,14 @@ def apply(st):
         swap_in(out)
     else:
         set_shader(PASSTHROUGH)
+    # Assert-set-assert. Around a config reload, Hyprland can reset the
+    # preconditions AFTER the first assertion has landed but before (or as)
+    # the shader compiles — the compile then sees the wrong damage tier and
+    # raises the sticky red banner even though the value is corrected a
+    # moment later. Restating after the swap means a late reset loses.
+    n2 = re.search(r"#define TUBE_COUNT\s+(\d+)", out.read_text())
+    preconditions(bool(st.get("animated")) and st["on"],
+                  int(n2.group(1)) if (n2 and st["on"]) else 0)
     errs = (hyprctl("configerrors") or "").strip()
     if errs and "no errors" not in errs:
         print(errs, file=sys.stderr)

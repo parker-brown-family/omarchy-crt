@@ -105,16 +105,25 @@ though TRACKING and FLICKER sit above zero: the band is configured and
 deliberately frozen, and a fresh install is silent.
 
 Turning TRACKING, FLICKER or JIGGLE above zero starts it, and taking the last of
-them back to zero stops it. Starting it also sets `debug:damage_tracking` to 0,
-because Hyprland's three-line red banner —
+them back to zero stops it. The plugin moves `debug:damage_tracking` between
+three tiers to match:
+
+| state | tier | what it costs |
+|---|---|---|
+| clock running | 0 | the whole screen redraws every frame — Hyprland's red banner names this price, and it is real |
+| still glass, tubes up | 1 | a change repaints its whole monitor; an idle monitor draws nothing |
+| glass off | 2 | Hyprland's default |
+
+Tier 1 is the quiet discovery: the gather only ever needed "repaint the whole
+monitor when anything changes", not "repaint everything always" — so a still
+glass keeps damage tracking on and costs next to nothing at idle. The banner —
 
 > Screen shader uses uniform 'time', which requires debug:damage_tracking to be
 > switched off.
 
-— is not a grumble about a choice you already made. It means the motion will not
-repaint until that setting is off. Leaving it unset earned the worst of both: a
-permanent error bar across the desktop *and* a tracking band that never swept.
-Stopping the clock hands the setting back.
+— belongs to the clock alone. It is not a grumble about a choice you already
+made: the motion will not repaint until tier 0 is set, so the plugin sets it
+when you start the clock and hands it back when you stop.
 
 ## Where the pieces are
 
