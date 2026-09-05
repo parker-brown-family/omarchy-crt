@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# Does Hyprland restart a screen shader's clock on every apply? LIVE probe.
+#
+#   test/probe-clock-reset
+#
+# THE CLAIM UNDER TEST. The ignition fx rests on one undocumented Hyprland
+# behaviour, read at tag v0.56.2 in src/render/OpenGL.cpp: applying a screen
+# shader that declares `uniform float time` records setInitialTime(now), and
+# every frame the shader is fed globalTimer - initialTime. If that holds, a
+# fresh apply IS a trigger — the clock starts at zero and a one-shot animation
+# plays itself. If it does not, the feature falls back to baking absolute
+# epochs, a different and worse design. So this runs FIRST, and a FAIL stops
+# the build rather than being worked around downstream.
+#
+# WHAT "EVERY APPLY" REALLY MEANS, and why the probe alternates two slots.
+# Hyprland will not recompile the path it is CURRENTLY using — re-applying the
+# live path is a no-op, and re-applying a path it compiled moments ago can
+# reuse the cached shader object with its old clock. Measured here 2026-09-05:
+# applying slot A while A was the just-used path showed a stale (red) clock,
+# while applying the ALTERNATE slot B always compiled fresh and reset to zero,
+# and switching back to A after B recompiled and reset A too. That is precisely
+# why swap_in() alternates crt-glass-a/-b: every real swap targets a
+# not-currently-live path, so every real swap resets. The probe tests that
+# real motion — prime a known-red clock on slot A, then prove the alternate
+# apply on slot B resets it.
+#
+# THE TEST. A probe shader passes the desktop through untouched except for a
+# 24 px square at the layout origin: green while time < 1.0, red after.
+#   1. Apply slot A. Poll until the square is red — the clock has passed 1 s.
+#   2. Apply slot B (a DIFFERENT path). If the clock reset, the square is green
+#      again; if the clock is global and survived, it stays red.
+# A green on step 2, after a confirmed red on step 1, is the reset — and it is
+# the exact operation the plugin performs on every window event.
+#
+# HOUSEKEEPING, on a live desktop. An active crt-tubes.service is stopped for
+# the probe's seconds and restarted after — it would take the shader back on
+# the next layout event. The time uniform demands damage tier 0 (Hyprland
+# latches the red bar over any other tier; `hyprctl seterror disable` clears
+# it, measured 2026-09-05); the tier is dropped for the probe and restored.
+# This Hyprland (0.56, Lua config) accepts option writes ONLY through
+# `hl.config` via eval — `hyprctl keyword` answers "can't work with non-legacy
+# parsers" — so writes go through eval, confirmed by readback, keyword kept as
+# the legacy fallback.
+set -uo pipefail
+
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/crt"
+mkdir -p "$STATE"
+
+need() { command -v "$1" >/dev/null || { echo "probe-clock-reset: $1 is required" >&2; exit 2; }; }
+need hyprctl; need grim; need python3
+
+A="$STATE/probe-clock-a.frag"
+B="$STATE/probe-clock-b.frag"
+# Same behaviour, distinct bytes per slot (the comment differs) so neither can
+# be mistaken for the other's cached object.
+emit() {
+cat <<EOF
+#version 320 es
+// probe-clock-reset slot $1 — green square while time < 1.0, red after.
+precision highp float;
+in vec2 v_texcoord;
+uniform sampler2D tex;
+uniform float time;
+out vec4 fragColor;
+void main() {
+    vec4 c = texture(tex, v_texcoord);
+    vec2 px = v_texcoord * vec2(textureSize(tex, 0));
+    if (px.x < 24.0 && px.y < 24.0)
+        c = (time < 1.0) ? vec4(0.0, 1.0, 0.0, 1.0) : vec4(1.0, 0.0, 0.0, 1.0);
+    fragColor = c;
+}
+EOF
+}
+emit a >"$A"; emit b >"$B"
+
+# Set a Hyprland option through eval (the only form a Lua config accepts), fall
+# back to keyword for a legacy parser, and CONFIRM via readback.
+set_opt() {
+  local opt="$1" val="$2" body="$3" got
+  hyprctl eval "hl.config({ $body })" >/dev/null 2>&1
+  got="$(hyprctl getoption "$opt" 2>/dev/null | awk '/^(int|str):/{print $2; exit}')"
+  if [[ "$got" != "$val" ]]; then
+    hyprctl keyword "$opt" "$val" >/dev/null 2>&1
+    got="$(hyprctl getoption "$opt" 2>/dev/null | awk '/^(int|str):/{print $2; exit}')"
+  fi
+  [[ "$got" == "$val" ]]
+}
+set_damage() { set_opt debug:damage_tracking "$1" "debug = { damage_tracking = $1 }"; }
+set_shader() { set_opt decoration:screen_shader "$1" "decoration = { screen_shader = \"$1\" }"; }
+
+prev_shader="$(hyprctl getoption decoration:screen_shader | awk '/^str:/{print $2}')"
+prev_damage="$(hyprctl getoption debug:damage_tracking | awk '/^int:/{print $2}')"
+unit_was=""
+if command -v systemctl >/dev/null &&
+   [[ "$(systemctl --user is-active crt-tubes.service 2>/dev/null)" == active ]]; then
+  unit_was="crt-tubes.service"
+  systemctl --user stop crt-tubes.service
+fi
+
+restore() {
+  if [[ -n "$prev_shader" && "$prev_shader" != "[[EMPTY]]" ]]; then
+    set_shader "$prev_shader" || true
+  elif [[ -f "$STATE/passthrough.frag" ]]; then
+    set_shader "$STATE/passthrough.frag" || true   # screen_shader cannot be unset
+  fi
+  [[ -n "$prev_damage" ]] && set_damage "$prev_damage" || true
+  hyprctl seterror disable >/dev/null 2>&1 || true
+  [[ -n "$unit_was" ]] && systemctl --user start "$unit_was"
+}
+trap restore EXIT
+
+# The square's colour: average a grim capture of it. One pixel could land on
+# anything; an average of 400 cannot be argued with. Classified by which of R/G
+# dominates, not a fixed threshold — the on-screen green measures ~120, not 255.
+sample() {
+  grim -t ppm -g "2,2 20x20" - | python3 -c '
+import sys
+d = sys.stdin.buffer.read()
+parts, i = [], 0
+while len(parts) < 4:
+    while d[i:i+1].isspace(): i += 1
+    if d[i:i+1] == b"#":
+        while d[i:i+1] not in (b"\n", b""): i += 1
+        continue
+    j = i
+    while d[j:j+1] and not d[j:j+1].isspace(): j += 1
+    parts.append(d[i:j]); i = j
+w, h = int(parts[1]), int(parts[2]); px = d[i+1:]; n = w * h
+r = sum(px[0::3][:n]) / n; g = sum(px[1::3][:n]) / n
+print("green" if g > r + 40 and g > 60 else "red" if r > g + 40 and r > 60 else "other")
+'
+}
+
+set_damage 0 || { echo "probe-clock-reset: could not set damage_tracking=0 (needed for the time uniform)" >&2; exit 2; }
+fail() { echo "probe-clock-reset: FAIL — $1" >&2; exit 1; }
+
+# 1. Prime a known-red clock on slot A. Poll up to ~2.5 s for the square to go
+#    red, proving the clock is advancing at all.
+set_shader "$A" || fail "could not apply the probe shader"
+went_red=""
+for _ in $(seq 1 10); do
+  if [[ "$(sample)" == red ]]; then went_red=1; break; fi
+  sleep 0.2
+done
+[[ -n "$went_red" ]] || fail "slot A never went red within ~2.5 s — the clock is not advancing (or the probe shader is not on screen)"
+
+# 2. Apply the ALTERNATE slot B. A green here — after A was confirmed red — is
+#    the reset: a global clock would carry A's >1 s time straight into B.
+set_shader "$B" || fail "could not apply slot B"
+reset=""
+for _ in $(seq 1 6); do
+  c="$(sample)"
+  if [[ "$c" == green ]]; then reset=1; break; fi
+  sleep 0.18
+done
+
+if [[ -n "$reset" ]]; then
+  echo "probe-clock-reset: PASS — slot A ran to red, then the alternate apply came up green. The clock restarts at zero on every (alternating) apply; trigger-by-swap is sound."
+else
+  fail "the alternate apply stayed red — the clock SURVIVED the swap. The reset assumption is dead; use epoch-baked starts (see the spec's contingency)."
+fi
