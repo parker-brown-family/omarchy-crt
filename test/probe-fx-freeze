@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Freeze the ignition arc at one instant and capture it, for photograph review.
+#
+#   test/probe-fx-freeze [t] [ignite|shutdown] [out.png]
+#     t     arc position 0..1 (default 0.55 — mid-collapse, the star forming)
+#
+# An effect that only exists for 300 ms cannot be reviewed with a screenshot
+# key, so — exactly like terminal-delight's TD_IGNITION_FREEZE — this pins the
+# arc at a chosen `t` by compiling the shader with ANIMATED 0 and a `const float
+# time` set to that instant, then captures the focused monitor. Because the
+# clock is a constant here, no `uniform float time` is declared, Hyprland never
+# demands damage tier 0, and the probe leaves the damage setting untouched.
+#
+# The single synthetic fx rect covers the focused monitor and is tinted with the
+# staged theme's phosphor (from the plugin's live.json, white if none), so the
+# photograph shows the real colour the feature will use — not a placeholder.
+#
+# Housekeeping mirrors probe-clock-reset: an active crt-tubes.service is stopped
+# for the capture and restarted, and the previous screen_shader binding is put
+# back on exit.
+set -uo pipefail
+
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/crt"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TEMPLATE="$ROOT/crt/crt-glass.frag"
+mkdir -p "$STATE"
+
+need() { command -v "$1" >/dev/null || { echo "probe-fx-freeze: $1 is required" >&2; exit 2; }; }
+need hyprctl; need grim; need jq; need python3
+
+T="${1:-0.55}"
+KIND_NAME="${2:-ignite}"
+OUT="${3:-$ROOT/reports/fx-freeze-$KIND_NAME-$T.png}"
+case "$KIND_NAME" in ignite) KIND=0;; shutdown) KIND=1;; *) echo "probe-fx-freeze: kind must be ignite|shutdown" >&2; exit 2;; esac
+
+# Focused monitor: id, name, and the mode pixel size the shader works in.
+read -r MON_ID MON_NAME MON_W MON_H < <(
+  hyprctl monitors -j | jq -r 'map(select(.focused))[0] | "\(.id) \(.name) \(.width) \(.height)"')
+[[ -n "${MON_ID:-}" ]] || { echo "probe-fx-freeze: no focused monitor" >&2; exit 2; }
+
+# Theme phosphor -> a GLSL vec3, from what the plugin actually published.
+TINT="$(python3 - "$STATE/live.json" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    h = (d.get("phosphor") or "").lstrip("#")
+    r, g, b = (int(h[i:i+2], 16) / 255 for i in (0, 2, 4))
+    print(f"vec3({r:.3f}, {g:.3f}, {b:.3f})")
+except Exception:
+    print("vec3(1.0, 1.0, 1.0)")
+PY
+)"
+
+# The frozen frame: the live template, with the clock nailed to this instant,
+# IGNITION full, and one fx rect over the whole focused monitor.
+FROZEN_TIME="$(python3 -c "print(f'{$T*0.30:.5f}')")"   # ft = time / FX_S, FX_S = 0.30
+PROBE="$STATE/probe-freeze.frag"
+python3 - "$TEMPLATE" "$PROBE" "$MON_ID" "$MON_W" "$MON_H" "$KIND" "$FROZEN_TIME" "$TINT" <<'PY'
+import re, sys
+tmpl, out, mon, w, h, kind, ftime, tint = sys.argv[1:9]
+s = open(tmpl).read()
+# ANIMATED stays 0; pin the still clock to the chosen instant.
+s = re.sub(r"^#define ANIMATED\s+[01]", "#define ANIMATED 0", s, count=1, flags=re.M)
+s = re.sub(r"const float time = 0\.0;", f"const float time = {ftime};", s, count=1)
+# IGNITION full so the flash is at reference brightness.
+s = re.sub(r"^const float IGNITION   = [0-9.]+;", "const float IGNITION   = 1.00;", s, count=1, flags=re.M)
+block = f"""// ---- FX DATA (managed by `crt tubes watch` — do not hand-edit) ----
+#define FX_COUNT 1
+#if FX_COUNT > 0
+const vec4  FX_RECT[FX_COUNT]  = vec4[FX_COUNT](vec4(0.0, 0.0, {float(w):.1f}, {float(h):.1f}));
+const int   FX_MON[FX_COUNT]   = int[FX_COUNT]({mon});
+const float FX_CURV[FX_COUNT]  = float[FX_COUNT](1.0);
+const float FX_START[FX_COUNT] = float[FX_COUNT](0.0);
+const int   FX_KIND[FX_COUNT]  = int[FX_COUNT]({kind});
+const vec3  FX_TINT[FX_COUNT]  = vec3[FX_COUNT]({tint});
+#endif
+// ---- END FX DATA ----"""
+s = re.sub(r"// ---- FX DATA.*?// ---- END FX DATA ----", block, s, count=1, flags=re.S)
+open(out, "w").write(s)
+PY
+
+if command -v glslangValidator >/dev/null; then
+  glslangValidator "$PROBE" >/dev/null || { echo "probe-fx-freeze: frozen shader does not compile" >&2; exit 1; }
+fi
+
+set_shader() {
+  hyprctl eval "hl.config({ decoration = { screen_shader = \"$1\" } })" >/dev/null 2>&1
+  local got; got="$(hyprctl getoption decoration:screen_shader | awk '/^str:/{print $2}')"
+  [[ "$got" == "$1" ]] || hyprctl keyword decoration:screen_shader "$1" >/dev/null 2>&1
+}
+
+prev_shader="$(hyprctl getoption decoration:screen_shader | awk '/^str:/{print $2}')"
+unit_was=""
+if command -v systemctl >/dev/null &&
+   [[ "$(systemctl --user is-active crt-tubes.service 2>/dev/null)" == active ]]; then
+  unit_was="crt-tubes.service"; systemctl --user stop crt-tubes.service
+fi
+restore() {
+  if [[ -n "$prev_shader" && "$prev_shader" != "[[EMPTY]]" ]]; then set_shader "$prev_shader"
+  elif [[ -f "$STATE/passthrough.frag" ]]; then set_shader "$STATE/passthrough.frag"; fi
+  hyprctl seterror disable >/dev/null 2>&1 || true
+  [[ -n "$unit_was" ]] && systemctl --user start "$unit_was"
+}
+trap restore EXIT
+
+mkdir -p "$(dirname "$OUT")"
+set_shader "$PROBE"
+sleep 0.4
+grim -o "$MON_NAME" "$OUT"
+echo "probe-fx-freeze: $KIND_NAME at t=$T on $MON_NAME -> $OUT"
