@@ -215,4 +215,23 @@ occlusion rule included. `crt install` puts the watcher under systemd for you.
 The optics are a port of [terminal-delight](https://github.com/parker-brown-family/terminal-delight)'s
 own display stack, dial for dial.
 
+## Removal
+
+```bash
+omarchy plugin remove brownfamilysports.crt --yes
+```
+
+`crt uninstall` (run it first if you want a tidy exit) takes the Hyprland
+wiring, the theme-set hook and the systemd unit back out; the plugin directory
+going away removes the rest. Your knobs in `$XDG_STATE_HOME/omarchy/crt/` are
+deliberately left, so a reinstall picks up where you left off — delete that
+directory to forget everything.
+
+## Dependencies
+
+Everything the glass needs ships in the repository or with Omarchy itself:
+`python3`, `hyprctl`, `jq` and `bash` are already on an Omarchy box.
+`glslangValidator` (`pacman -S glslang`) is optional and recommended — with it,
+a knob turn that would not compile never reaches your compositor.
+
 MIT.
