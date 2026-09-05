@@ -312,6 +312,14 @@ check "it lands after looknfeel, so it wins over a theme's shader" \
 check 'a passthrough exists for "crt off" to point at' \
   "$([[ -f "$XDG_STATE_HOME/omarchy/crt/passthrough.frag" ]] && echo y || echo n)" "y"
 
+# crt.lua is what applies the glass at LOGIN, and it had been left pointing at
+# ~/.config/hypr/shaders/crt-glass.frag after the shader moved into the state
+# directory. Nothing caught it because every test so far used `try`, which sets
+# the shader at runtime and never reads crt.lua at all — so the cold-start path
+# was broken, and silently.
+check "crt.lua names the shader that actually gets built" \
+  "$(grep -c "$SHADER" "$HOME/.config/hypr/crt.lua")" "1"
+
 # ---------------------------------------------------------------------------
 # STAYING OUT OF THE THEME'S WAY.
 #

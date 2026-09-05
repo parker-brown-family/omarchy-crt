@@ -32,8 +32,8 @@ template under this plugin is read-only, the settings live in
 
     $XDG_STATE_HOME/omarchy/crt/knobs.json
 
-and the live shader at ~/.config/hypr/shaders/crt-glass.frag is a build output
-that can be deleted at any time and rebuilt from those two.
+and the live shader in that same directory is a build output that can be
+deleted at any time and rebuilt from those two.
 
 TWO TIERS OF KNOB. The front panel is four dials, because a real set had four:
 BARREL, FADE, TRACKING and SCANLINE each drive a group of shader constants.
@@ -66,6 +66,8 @@ TEMPLATE = PLUGIN / "crt-glass.frag"
 SHADER = STATE / "crt-glass.frag"
 PASSTHROUGH = STATE / "passthrough.frag"
 PREVIOUS = STATE / "previous-shader"
+# Two paths holding identical bytes, used alternately. See swap_in().
+SLOTS = (STATE / "crt-glass-a.frag", STATE / "crt-glass-b.frag")
 WATCHER_PID = STATE / "watcher.pid"
 
 # Every Hyprland event that can move, create or destroy a surface. The layer
@@ -580,9 +582,14 @@ def tubes_watch():
     def refresh(why):
         nonlocal last
         block = td_tubes_block(load().get("passthrough", []))
-        if block is None or block == last:
+        if block is None:
             return
-        last = block
+        key = block_key(block)
+        if key == last:
+            if os.environ.get("CRT_WATCH_DEBUG"):
+                print(f"crt: (no change)  <- {why}", flush=True)
+            return
+        last = key
         write_tubes(block)
         apply(load())
         n = re.search(r"#define TUBE_COUNT\s+(\d+)", block)
@@ -609,7 +616,7 @@ def tubes_watch():
                 if name == "configreloaded":
                     st = load()
                     preconditions(bool(st.get("animated")) and st["on"],
-                                  1 if last and "TUBE_COUNT 0" not in last else 0)
+                                  len(last) if isinstance(last, tuple) else 0)
                 if name in WATCH_EVENTS:
                     refresh(name)
     finally:
@@ -805,6 +812,69 @@ def preconditions(animated, tube_count):
             f"hl.config({{ cursor = {{ no_hardware_cursors = {want_cursor} }} }})")
 
 
+def swap_in(built):
+    """Point Hyprland at the new shader with no flat frame in between.
+
+    Hyprland will not recompile a path it is already using, so a rebuild has to
+    arrive under a DIFFERENT path. Doing that by setting the passthrough shader
+    first and ours second is two compositor states, and the first of them is the
+    glass switched off — one flat frame, every time, which on a watcher that
+    fires whenever focus moves is a flash whenever you cross between windows.
+
+    Two slots holding identical bytes solve it: write the build output to
+    whichever slot is not live, point at that, and Hyprland compiles the new
+    path and swaps. There is no moment where the desktop is unglassed.
+    """
+    now = live_shader()
+    slot = SLOTS[1] if now == str(SLOTS[0]) else SLOTS[0]
+    slot.write_bytes(built.read_bytes())
+    set_shader(slot)
+
+
+def _tube_rows(block):
+    """(mon, x, y, w, h, curv, pass) per tube, or None if it cannot be read."""
+    rects = re.findall(r"vec4\(\s*([-0-9.]+),\s*([-0-9.]+),\s*([-0-9.]+),\s*([-0-9.]+)\s*\)",
+                       block)
+    def ints(name):
+        m = re.search(rf"{name}\[TUBE_COUNT\]\s*=\s*\w+\[TUBE_COUNT\]\(([^)]*)\)",
+                      block, re.S)
+        return [v.strip() for v in m.group(1).split(",")] if m else []
+    mons, curvs, passes = ints("TUBE_MON"), ints("TUBE_CURV"), ints("TUBE_PASS")
+    if not rects or len(mons) != len(rects):
+        return None
+    if len(curvs) != len(rects):
+        curvs = ["0"] * len(rects)
+    if len(passes) != len(rects):
+        passes = ["0"] * len(rects)
+    return [(mons[i], *rects[i], curvs[i], passes[i]) for i in range(len(rects))]
+
+
+def block_key(block):
+    """What actually has to change before the shader is worth rebuilding.
+
+    td-tubes emits most-recently-focused first so an overlapping window takes
+    the pixels it covers. That makes the ORDER meaningful only where rects
+    overlap — and on a tiled monitor they never do, so exactly one rect can
+    contain any pixel and the order carries nothing. Focusing another window
+    rewrites the list without moving a single rectangle; comparing the ordered
+    text made every one of those a shader recompile.
+    """
+    rows = _tube_rows(block)
+    if rows is None:
+        return block
+    by_mon = {}
+    for r in rows:
+        by_mon.setdefault(r[0], []).append(tuple(float(v) for v in r[1:5]))
+    for rs in by_mon.values():
+        for i in range(len(rs)):
+            for j in range(i + 1, len(rs)):
+                ax, ay, aw, ah = rs[i]
+                bx, by, bw, bh = rs[j]
+                if ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah:
+                    return block          # overlapping: order decides ownership
+    return tuple(sorted(rows))
+
+
 def apply(st):
     write_passthrough()
     out = render(st)
@@ -816,9 +886,10 @@ def apply(st):
     n = re.search(r"#define TUBE_COUNT\s+(\d+)", out.read_text())
     preconditions(bool(st.get("animated")) and st["on"],
                   int(n.group(1)) if (n and st["on"]) else 0)
-    set_shader(PASSTHROUGH)
     if st["on"]:
-        set_shader(out)
+        swap_in(out)
+    else:
+        set_shader(PASSTHROUGH)
     errs = (hyprctl("configerrors") or "").strip()
     if errs and "no errors" not in errs:
         print(errs, file=sys.stderr)
@@ -841,7 +912,7 @@ def install():
 -- over a theme that also sets screen_shader. That ordering is the whole reason
 -- the CRT can outlive a theme switch: the picture is the plugin's, the colours
 -- come from whatever theme happens to be on.
-local frag = os.getenv("HOME") .. "/.config/hypr/shaders/crt-glass.frag"
+local frag = "{SHADER}"
 local probe = io.open(frag, "r")
 if probe then
   probe:close()
