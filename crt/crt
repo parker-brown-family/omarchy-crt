@@ -641,9 +641,9 @@ def write_tubes(block):
 # fx_pattern, ported from terminal-delight. The shader draws it; this half
 # decides WHICH rect fires, WHEN, and keeps arcs alive across the shader
 # rebuilds that other events trigger. The whole feature is off unless the
-# IGNITION knob is above zero, and every arc lasts FX_S seconds.
-FX_S    = 0.30   # arc length, matched to crt-glass.frag's FX_S / crt.rs IGNITION_MS
-FX_PAD  = 0.05   # grace past FX_S before an entry is pruned
+# IGNITION knob is above zero.
+FX_S_DEFAULT = 0.30  # arc length shipped, matched to crt-glass.frag / crt.rs IGNITION_MS
+FX_PAD  = 0.05   # grace past the arc length before an entry is pruned
 FX_LEAD = 0.03   # start each arc this far in, to eat the compile+swap latency
 FX_MAX  = 8      # most arcs baked at once; a storm keeps the newest
 
@@ -655,6 +655,19 @@ def ignition_level(st):
         return float(st.get("service", {}).get("IGNITION", 0.0))
     except (TypeError, ValueError):
         return 0.0
+
+
+def fx_duration(st):
+    """How long an arc lasts, in seconds — the FX_S knob, defaulting to TD's
+    0.30 s. The shader plays over its own FX_S const (set from the same knob by
+    render), so this side must read the SAME value or the expiry would prune a
+    longer arc before it finished. Clamped to a sane range so a typo cannot wedge
+    the watch on a multi-second or zero-length arc."""
+    try:
+        v = float(st.get("service", {}).get("FX_S", FX_S_DEFAULT))
+    except (TypeError, ValueError):
+        return FX_S_DEFAULT
+    return min(3.0, max(0.05, v))
 
 
 def norm_addr(a):
@@ -817,9 +830,11 @@ def tubes_watch():
     fx = {}            # addr -> {kind, mon, rect, curv, t0}
     addr_rows = {}     # addr -> row, from the PREVIOUS snapshot: the only place
                        # a window that just closed still has a rectangle.
+    fx_dur = FX_S_DEFAULT   # arc length, re-read from the knob on every refresh so
+                            # the loop's expiry timeout tracks `crt set FX_S`.
 
     def refresh(why, data=""):
-        nonlocal last, last_fx, addr_rows, fx
+        nonlocal last, last_fx, addr_rows, fx, fx_dur
         t_enter = _time.monotonic()   # for the latency probe: event -> swap done
         stw = load()
         block, rows = td_tubes_snapshot(stw.get("passthrough", []),
@@ -832,6 +847,7 @@ def tubes_watch():
         # carry window addresses; without addresses a close event cannot be tied
         # to the rect that vanished, so rather than guess, fx stays dark.
         level = ignition_level(stw)
+        fx_dur = fx_duration(stw)
         have_addr = any(r.get("addr") for r in rows)
         fx_on = level > 0.0 and have_addr
         if level > 0.0 and not have_addr and os.environ.get("CRT_WATCH_DEBUG"):
@@ -852,7 +868,7 @@ def tubes_watch():
             # Drop arcs whose time is up, and if a storm of events outran the
             # budget, keep the newest — a flash you cannot see is not worth a
             # slot in the array the shader loops over every pixel.
-            for a in [a for a, e in fx.items() if now - e["t0"] > FX_S + FX_PAD]:
+            for a in [a for a, e in fx.items() if now - e["t0"] > fx_dur + FX_PAD]:
                 del fx[a]
             if len(fx) > FX_MAX:
                 for a, _ in sorted(fx.items(), key=lambda kv: kv[1]["t0"])[:-FX_MAX]:
@@ -897,7 +913,7 @@ def tubes_watch():
             timeout = None
             if fx:
                 oldest = min(e["t0"] for e in fx.values())
-                timeout = max(0.0, oldest + FX_S + FX_PAD - _time.monotonic())
+                timeout = max(0.0, oldest + fx_dur + FX_PAD - _time.monotonic())
             ready, _, _ = _select.select([s], [], [], timeout)
             if not ready:
                 refresh("fx-expiry")
