@@ -3,7 +3,9 @@
 Curved glass, scanlines and a phosphor glow over the whole Omarchy desktop —
 on **any** theme, with four knobs on the bar.
 
-<!-- docs/tray.png — run bin/shoot, crop, commit. Never a live capture. -->
+![The standard Omarchy scene, behind the glass](docs/glass.png)
+
+<!-- still wanted: the knob tray — open it on the staged scene and crop (docs/tray.png) -->
 
 A CRT filter is a **lens**, and a lens is not a palette. This one used to ship
 inside the `terminal-delight` theme, which meant you could own a curved monitor
