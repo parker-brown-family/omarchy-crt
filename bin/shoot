@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Photograph the glass for the README, on a workspace built for the purpose.
+#
+#   bin/shoot                 stage, capture to docs/, tear down
+#   bin/shoot --keep          leave the staged workspace up so you can adjust
+#                             it and re-shoot by hand
+#
+# It returns you to the workspace you started on, always.
+#
+# WHY STAGE AT ALL. The first five images in this repo were captures of a live
+# desktop, and they carried a chat transcript, a social feed, an account
+# balance and a handful of client filenames into a directory destined to be
+# public. Terminal Paint had already written the rule down in its own shoot
+# script — "shooting the live desktop would put whatever happens to be on
+# screen, someone's mail, someone's diff, into a public README" — and it was
+# broken here anyway, one convenient grim at a time. So there is a script, and
+# the script owns a workspace nobody works in.
+#
+# WHAT THE PICTURE HAS TO SHOW is the thing a still frame is worst at. The
+# curve reads instantly; the scanlines read at full size and vanish when the
+# image is scaled down for a README; the tracking band is up less than half the
+# time and cannot be aimed at. So the staged panes are built from straight
+# rules and blocks of solid colour — geometry that a barrel warp visibly bends
+# and a flat desktop visibly does not — rather than prose, which bends
+# invisibly.
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OUT="$ROOT/docs"
+CRT="$ROOT/crt/crt"
+KEEP=""
+for a in "$@"; do [[ $a == --keep ]] && KEEP=1; done
+
+WS=8                       # far from anything in daily use
+HOME_WS="$(hyprctl activeworkspace -j | jq -r '.id' 2>/dev/null || echo 1)"
+
+need() { command -v "$1" >/dev/null || { echo "shoot: need $1" >&2; exit 1; }; }
+need hyprctl; need grim; need jq; need foot
+
+cleanup() {
+  if [[ -z $KEEP ]]; then
+    while IFS= read -r a; do
+      [[ -n $a ]] || continue
+      hyprctl dispatch "hl.dsp.window.close({ window = \"address:$a\" })" >/dev/null 2>&1
+    done < <(hyprctl clients -j | jq -r --argjson w "$WS" '.[] | select(.workspace.id == $w) | .address')
+  fi
+  hyprctl dispatch "hl.dsp.focus({ workspace = $HOME_WS })" >/dev/null 2>&1
+  rm -f "$demo" 2>/dev/null
+}
+demo=""
+trap cleanup EXIT
+
+mkdir -p "$OUT"
+hyprctl dispatch "hl.dsp.focus({ workspace = $WS })" >/dev/null 2>&1
+sleep 0.5
+
+# Rules and blocks, not sentences. A barrel warp is only visible against
+# something straight, and nothing in a paragraph is straight.
+demo="$(mktemp)"
+cat >"$demo" <<'SH'
+clear
+printf '\n  \033[1mDELIGHT-O-MATIC\033[0m   MODEL TD-1969\n'
+printf '  ┌────────────────────────────────────────────────┐\n'
+for _ in 1 2 3; do
+  printf '  │'; for i in 1 2 3 4 5 6; do printf '\033[4%dm        \033[0m' "$i"; done; printf '│\n'
+done
+printf '  ├────────────────────────────────────────────────┤\n'
+for _ in 1 2 3 4 5 6; do
+  printf '  │                                                │\n'
+done
+printf '  └────────────────────────────────────────────────┘\n\n'
+printf '  \033[32m$\033[0m crt set BARREL 0.7\n'
+printf '  \033[32m$\033[0m crt tubes watch\n'
+printf '  6 tube(s)\n\n'
+printf '  ════════════════════════════════════════════════\n'
+printf '  ────────────────────────────────────────────────\n'
+printf '  ················································\n\n'
+exec sleep 900
+SH
+
+for _ in 1 2; do
+  setsid foot --title "crt-shot" bash --rcfile "$demo" -i >/dev/null 2>&1 &
+  sleep 0.8
+done
+sleep 1.5
+
+# The rects have to be true for the shot or the panes wear each other's maps.
+if [[ -x $CRT ]]; then
+  python3 "$CRT" tubes >/dev/null 2>&1 || true
+  sleep 0.8
+fi
+
+echo "shoot: capturing"
+
+# 1. the glass over staged panes — the curve, the bezel, the scanlines
+grim "$OUT/raw-glass.png"
+
+# 2. the tray, which is a layer surface and therefore drawn flat and sharp
+omarchy-shell brownfamilysports.crt open >/dev/null 2>&1
+sleep 2.0
+grim "$OUT/raw-tray.png"
+omarchy-shell brownfamilysports.crt close >/dev/null 2>&1
+
+cat <<EOF
+
+  wrote $OUT/raw-glass.png
+        $OUT/raw-tray.png
+
+  These are whole-desktop captures at full resolution. Crop them to the part
+  that shows the thing — the tray sits under its bar icon, the glass reads best
+  on one pane — and save as docs/tray.png and docs/glass.png. A README image
+  wants about 1100px wide; scanlines disappear below roughly 900.
+
+  bin/shoot --keep leaves the workspace up if you want to arrange it yourself
+  and shoot by hand.
+EOF
