@@ -135,7 +135,7 @@ when you start the clock and hands it back when you stop.
 | `crt/crt` | render, knobs, tubes, install |
 | `crt/crt-tubes.service` | the watcher that keeps the rects true |
 | `bin/shoot` | stages a workspace and photographs it — never the live desktop |
-| `test/run` | 82 assertions in a sandbox, with `hyprctl` and `systemctl` stubbed |
+| `test/run` | the suite — a sandboxed HOME with `hyprctl` and `systemctl` stubbed |
 
 ## Tubes: one per surface, or none
 
@@ -190,7 +190,7 @@ theme's file stays the single place that logic is edited; the plugin carries
 its own copy so it runs with no theme installed at all, and
 `bin/sync-tubes-geometry --check` says whether the copy has gone stale.
 `test/probe-fullscreen-layer` proves the copy against a stubbed compositor,
-occlusion rule included.
+occlusion rule included. `crt install` puts the watcher under systemd for you.
 
 The optics are a port of [terminal-delight](https://github.com/parker-brown-family/terminal-delight)'s
 own display stack, dial for dial.

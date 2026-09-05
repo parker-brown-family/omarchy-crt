@@ -21,6 +21,7 @@ line that sources td-monitor (whose helpers the geometry functions never call
 — a die() shim covers the one exception). test/run proves the copy still
 answers a stubbed compositor correctly, fullscreen occlusion included.
 """
+import os
 import re
 import subprocess
 import sys
@@ -28,7 +29,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "crt/tubes-geometry"
-UPSTREAM = Path.home() / "Work/omarchy-terminal-delight-theme/bin/td-tubes"
+# A maintainer tool: it regenerates the vendored copy FROM the theme
+UPSTREAM = Path(os.environ.get(
+    "TD_TUBES_UPSTREAM",
+    Path.home() / "Work/omarchy-terminal-delight-theme/bin/td-tubes"))
 
 if not UPSTREAM.exists():
     sys.exit(f"sync-tubes-geometry: upstream not found at {UPSTREAM}")

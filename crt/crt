@@ -1033,10 +1033,34 @@ end
         print(f"already wired into {HYPRLAND_LUA}")
 
     write_theme_hook()
+    install_unit()
     st = load()
     commit(st)
     print(f"rendered {SHADER}")
     show(st)
+
+
+def install_unit():
+    """Put the watcher under systemd, pointing at THIS checkout.
+
+    The unit template carries a %h path that is only right for the standard
+    `omarchy plugin add` location, and the README told people to enable a unit
+    systemd had never been shown. The installed copy gets its ExecStart written
+    from where the plugin actually is, so a hand clone works the same.
+    """
+    if not shutil.which("systemctl"):
+        print("systemctl not found — start the watcher yourself: crt tubes watch")
+        return
+    unit_dir = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "systemd/user"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    text = (PLUGIN / "crt-tubes.service").read_text()
+    text = re.sub(r"^ExecStart=.*$",
+                  f"ExecStart={PLUGIN / 'crt'} tubes watch", text, flags=re.M)
+    (unit_dir / "crt-tubes.service").write_text(text)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    subprocess.run(["systemctl", "--user", "enable", "--now", "crt-tubes.service"],
+                   capture_output=True)
+    print("watcher: crt-tubes.service installed and started")
 
 
 def write_theme_hook():
@@ -1068,6 +1092,13 @@ def uninstall():
             HYPRLAND_LUA.write_text(re.sub(rf"^{re.escape(REQUIRE)}\n?", "", text, flags=re.M))
     CRT_LUA.unlink(missing_ok=True)
     THEME_HOOK.unlink(missing_ok=True)
+    if shutil.which("systemctl"):
+        subprocess.run(["systemctl", "--user", "disable", "--now", "crt-tubes.service"],
+                       capture_output=True)
+        unit = (Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+                / "systemd/user/crt-tubes.service")
+        unit.unlink(missing_ok=True)
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
     SHADER.unlink(missing_ok=True)
     write_passthrough()
     set_shader(PASSTHROUGH)

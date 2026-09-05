@@ -23,7 +23,7 @@
     <div class="sc commentable" data-id="ships-effect" data-title="The effect">
       <span class="hint-tip">&#x1F4AC; comment</span>
       <div class="lbl">The effect</div>
-      Ignition on <code>openwindow</code>, shutdown on <code>closewindow</code>, for every window that wears a curved tube. Terminal Delight windows are exempt by construction &#x2014; they play their own per-pane ignition, and their tubes carry curvature 0, which is the gate.
+      Ignition on <code>openwindow</code>, shutdown on <code>closewindow</code>, for every window that wears a curved tube, flashing in the staged theme&#x2019;s phosphor. Terminal Delight windows are exempt by construction &#x2014; they play their own per-pane ignition, and their tubes carry curvature 0, which is the gate.
     </div>
     <div class="sc commentable" data-id="ships-knob" data-title="The knob">
       <span class="hint-tip">&#x1F4AC; comment</span>
@@ -93,7 +93,7 @@ float fx_pattern(vec2 w, float t, out float ground) {
   <div class="cal cn commentable" data-id="arc-layering" data-title="Layering">
     <span class="hint-tip">&#x1F4AC; comment</span>
     <div class="ct">Layering, exactly as the terminal does it</div>
-    The flash composites after the base colour is sampled and before the scanline, tracking, vignette and grade stages &#x2014; TD&#x2019;s words: &#x201C;above the grid and below the glass&#x201D;. The scanlines and curvature in the result are not drawn by the effect; they are what the glass does to whatever it is shown. The flash stays white, as in TD &#x2014; the grade and phosphor stages tint it downstream.
+    The flash composites after the base colour is sampled and before the scanline, tracking, vignette and grade stages &#x2014; TD&#x2019;s words: &#x201C;above the grid and below the glass&#x201D;. The scanlines and curvature in the result are not drawn by the effect; they are what the glass does to whatever it is shown. <b>Decided 2026-09-05: the flash carries the staged theme&#x2019;s phosphor</b>, baked per entry as <code>FX_TINT</code> &#x2014; gruvbox flashes amber, catppuccin mauve. When no theme is staged (or colour parsing fails) the entry bakes pure white, TD&#x2019;s own hue, rather than guessing. The per-entry array is deliberate: it is the hook for Terminal Paint (omarchy-td-palette) to tint a painted terminal&#x2019;s flash with that terminal&#x2019;s own colour later, by address, with no shader change.
   </div>
   </div>
 </div>
@@ -177,6 +177,9 @@ def refresh(why, data=""):
     last_key, last_sig = key, sig
     write_tubes(block)
     write_fx(fx)                            # FX_START = −(now − t0 + FX_LEAD)
+                                            # FX_TINT  = staged theme phosphor,
+                                            #            white when no theme parses
+                                            #            (Terminal Paint hook later)
     apply(st)
 
 # The blocking recv loop becomes a selectors loop so an expiry can fire
@@ -215,6 +218,8 @@ const int   FX_MON[FX_COUNT]   = int[FX_COUNT](0, 0);
 const float FX_CURV[FX_COUNT]  = float[FX_COUNT](1.0, 1.0);
 const float FX_START[FX_COUNT] = float[FX_COUNT](-0.12, 0.0);  // ≤ 0: seconds
 const int   FX_KIND[FX_COUNT]  = int[FX_COUNT](1, 0);          // 0 ignite, 1 shutdown
+const vec3  FX_TINT[FX_COUNT]  = vec3[FX_COUNT](               // staged phosphor;
+    vec3(0.133, 0.773, 0.369), vec3(0.133, 0.773, 0.369));     // white when unknown
 #endif
 // ---- END FX DATA ----</pre>
   <p style="margin-bottom:12px">The template in git ships <code>FX_COUNT 0</code> and every branch compiles out &#x2014; the same SHIPPED-AT-ZERO discipline the TUBE block carries, pinned by the same test. The watch splices this block from <code>fx.glsl</code> exactly the way <code>tubes.glsl</code> is spliced today, with the same must-define-a-count guard, and additionally treats a count above zero as zero when no watcher is alive &#x2014; fx is runtime state that only a live watch can keep true.</p>
@@ -240,7 +245,7 @@ const int   FX_KIND[FX_COUNT]  = int[FX_COUNT](1, 0);          // 0 ignite, 1 sh
         // outside the warped face = the tube's dark rim, while the ground holds
         if (w.x &lt; 0.0 || w.x &gt; 1.0 || w.y &lt; 0.0 || w.y &gt; 1.0) f = 0.0;
         col = mix(col, vec3(0.0), ground);           // the unlit tube face
-        col += vec3(f * IGNITION);                   // the flash, white
+        col += FX_TINT[i] * (f * IGNITION);          // the flash, in the entry's tint
     }
 #endif</pre>
   <div class="cal cw commentable" data-id="shader-clock" data-title="Clock forcing">
@@ -334,7 +339,7 @@ When probe-fx-freeze bakes a build with ANIMATED 0, const time = T, one syntheti
 Then the applied still frame shows the arc at T — bloom, collapse or star by choice —
      bowed by the tube warp, under the scanlines, inside the dark face
 And bin/shoot captures it for photograph review, and the probe restores the live state</pre></div>
-        <div class="tbfield"><div class="tblabel">Gotchas</div>GLSL ES float literals: every constant through the existing <code>glsl()</code> discipline or a driver rejects bare ints in const arrays. The freeze probe overrides the <code>const float time</code> branch, not the uniform &#x2014; frozen means damage tracking stays untouched. Insertion is between the <code>col</code> assembly and the scanline block; the TUBE_PASS early-return above it is what makes passthrough windows physically unflashable &#x2014; do not move it.</div>
+        <div class="tbfield"><div class="tblabel">Gotchas</div>GLSL ES float literals: every constant through the existing <code>glsl()</code> discipline or a driver rejects bare ints in const arrays. The freeze probe overrides the <code>const float time</code> branch, not the uniform &#x2014; frozen means damage tracking stays untouched. Insertion is between the <code>col</code> assembly and the scanline block; the TUBE_PASS early-return above it is what makes passthrough windows physically unflashable &#x2014; do not move it. The synthetic entry&#x2019;s <code>FX_TINT</code> comes from the staged theme, so the photograph reviews the real colour, not a placeholder.</div>
         <div class="tbfield"><div class="tblabel">Verification</div>glslangValidator passes at count 0 and at a two-entry bake with a negative start; photographs of t=0.2 / 0.55 / 0.9 reviewed against TD&#x2019;s reference frames; shipped template byte-diff empty when the block is at zero.</div>
       </div>
     </div>
@@ -357,7 +362,7 @@ Then within one refresh the shader swap carries a shutdown entry at that window'
 And a second window event 120 ms later re-bakes the in-flight entry at −0.15
      (elapsed plus lead) so its arc continues instead of restarting
 And 350 ms after the last t0 the expiry fires and the steady shader returns</pre></div>
-        <div class="tbfield"><div class="tblabel">Gotchas</div>The recv loop becomes a <code>selectors</code> loop &#x2014; the expiry must fire with no event arriving. Event data addresses lack the <code>0x</code> prefix hyprctl uses; normalise both sides. <code>closewindow</code> looks up the <em>previous</em> snapshot&#x2019;s map &#x2014; the new one no longer knows the window. The triggering entry&#x2019;s offset is 0, not &#x2212;lead. Focus-follows-close fires <code>activewindowv2</code> immediately after <code>closewindow</code>; the signature pair makes the second refresh a no-op unless the quiet flags flipped, which is a legitimate swap and the offsets ride it.</div>
+        <div class="tbfield"><div class="tblabel">Gotchas</div>The recv loop becomes a <code>selectors</code> loop &#x2014; the expiry must fire with no event arriving. Event data addresses lack the <code>0x</code> prefix hyprctl uses; normalise both sides. <code>closewindow</code> looks up the <em>previous</em> snapshot&#x2019;s map &#x2014; the new one no longer knows the window. The triggering entry&#x2019;s offset is 0, not &#x2212;lead. Focus-follows-close fires <code>activewindowv2</code> immediately after <code>closewindow</code>; the signature pair makes the second refresh a no-op unless the quiet flags flipped, which is a legitimate swap and the offsets ride it. <code>write_fx</code> resolves each entry&#x2019;s tint at bake time: <code>theme_colours()</code> phosphor, or pure white when it answers None &#x2014; never the template&#x2019;s baked green, which would paint every non-TD theme wrong.</div>
         <div class="tbfield"><div class="tblabel">Verification</div>Unit tests on <code>fx_sig</code> stability, offset arithmetic, prune, and the drop-oldest cap at 8; a live close under <code>CRT_WATCH_DEBUG</code> logs entry, swap, expiry in order.</div>
       </div>
     </div>
@@ -467,6 +472,7 @@ But if the ignition's raw pop before the dark face lands reads badly in the fles
       <tr><td>Hyprland C++ plugin animating the compositor&#x2019;s close-snapshots</td><td>rejected</td><td>true content-collapse is not even what TD does &#x2014; its effect is emissive-only, so the shader port is full parity at a fraction of the surface; a compiled plugin buys ABI churn for nothing visible</td></tr>
       <tr><td>Epoch-baked animation starts (absolute time, no reset reliance)</td><td>contingency only</td><td>drift-prone and needs Hyprland&#x2019;s start time; reached for only if the falsifier fails</td></tr>
       <tr><td>Porting fx into the theme&#x2019;s own bash td-tubes</td><td>deferred</td><td>a state machine with timers in bash is a second implementation of everything above; the plugin owns the watch &#x2014; if the theme wants it later, that is its own spec</td></tr>
+      <tr><td>Per-terminal flash tint from Terminal Paint (omarchy-td-palette)</td><td>deferred, hook shipped</td><td>wanted &#x2014; a painted terminal&#x2019;s flash should wear its own colour. The per-entry <code>FX_TINT</code> array is that hook; filling it per window means looking up Terminal Paint&#x2019;s colour by address at bake time, which needs that plugin to expose its per-window state &#x2014; its own small ticket in that repo. v1 bakes the theme phosphor for every entry</td></tr>
       <tr><td>Workspace-switch &#x201C;channel change&#x201D; (every tube on the new workspace ignites)</td><td>deferred</td><td>possibly the killer feature, definitely a taste risk; it is one eligibility branch away once open/close has been lived with</td></tr>
       <tr><td>Tracking-band phase continuity across swaps (bake a band offset the same way)</td><td>deferred polish</td><td>the band already restarts on every layout swap today; the fx machinery makes fixing it nearly free, but it is a separate observable change</td></tr>
       <tr><td>Duration/easing knobs</td><td>never</td><td>TD calls 300 ms &#x201C;punctuation, not a cutscene&#x201D; and ships it as a constant; so do we</td></tr>
@@ -508,27 +514,31 @@ But if the ignition's raw pop before the dark face lands reads badly in the fles
   </div>
 </div>
 
-<!-- ═══════════════ OPEN QUESTIONS ═══════════════ -->
+<!-- ═══════════════ DECISIONS ═══════════════ -->
 <div class="sec xsec" data-open="false">
-  <div class="stitle xhdr" onclick="toggleXSec(this)"><span class="xtrig">&#x25BC;</span> Open questions</div>
+  <div class="stitle xhdr" onclick="toggleXSec(this)"><span class="xtrig">&#x25BC;</span> Decisions taken &#x2014; 2026-09-05</div>
   <div class="xbody">
-  <div class="qbox commentable" data-id="q1" data-title="Q1 flash colour">
+  <p style="margin-bottom:12px">Nothing in this spec is waiting on a decision. The three questions the first draft asked came back answered on 2026-09-05, and the body above already reflects them.</p>
+  <div class="qbox commentable" data-id="q1" data-title="Decision: flash colour">
     <span class="hint-tip">&#x1F4AC; comment</span>
-    <div class="qnum">Q1 &#x2014; Does the flash stay white, or take the theme&#x2019;s phosphor?</div>
-    <div class="qtxt">TD&#x2019;s flash is white and the grade tints it downstream; the plugin retints phosphor per theme everywhere else.</div>
-    <div class="qctx">Recommendation: white, exactly as TD &#x2014; the tracking band is phosphor-coloured because it is a signal artifact; the ignition flash is the beam itself. Revisit only if the photographs disagree.</div>
+    <div class="qnum">The flash wears the theme&#x2019;s phosphor &#x2014; decided, spec updated</div>
+    <div class="qtxt">Parker: the theme&#x2019;s phosphor, one hundred percent &#x2014; and Terminal Paint themes individual terminals, which this should be able to honour later; white stays as the fallback when the theme path cannot answer.</div>
+    <div class="qctx">Landed as the per-entry <code>FX_TINT</code> array: staged phosphor today (white when no theme parses &#x2014; never the template&#x2019;s baked green on a foreign theme), and the exact seam where Terminal Paint&#x2019;s per-window colour plugs in by address, with no shader change. The Terminal Paint lookup itself is a deferred row in the table above.</div>
   </div>
-  <div class="qbox commentable" data-id="q2" data-title="Q2 open half">
+  <div class="qbox commentable" data-id="q2" data-title="Decision: open half">
     <span class="hint-tip">&#x1F4AC; comment</span>
-    <div class="qnum">Q2 &#x2014; Does ignition-on-open ship in the first release?</div>
-    <div class="qtxt">Both halves cost the same to build; only the open half risks a visible raw pop before the dark face lands.</div>
-    <div class="qctx">Recommendation: build both behind the one knob and let FX-7&#x2019;s latency number and photographs decide &#x2014; a pre-emptive scope cut would be deciding on a guess we are about to replace with a measurement.</div>
+    <div class="qnum">Both halves build behind the one knob &#x2014; decided</div>
+    <div class="qtxt">Ignition-on-open is built alongside shutdown; whether it ships enabled is settled by the latency number and the photographs, in the acceptance ticket that owns that call.</div>
   </div>
-  <div class="qbox commentable" data-id="q3" data-title="Q3 default">
+  <div class="qbox commentable" data-id="q3" data-title="Decision: default">
     <span class="hint-tip">&#x1F4AC; comment</span>
-    <div class="qnum">Q3 &#x2014; Does IGNITION ever default on?</div>
-    <div class="qtxt">Shipping at zero is doctrine for tube state; a knob default is a softer question &#x2014; FLICKER ships at 0.35.</div>
-    <div class="qctx">Recommendation: 0.00 for the release that introduces it. After a few weeks of living with it, defaulting to 1.0 is a one-line change with its own tiny discussion.</div>
+    <div class="qnum">IGNITION defaults to 0.00 &#x2014; decided</div>
+    <div class="qtxt">Off in the release that introduces it. Flipping the default on is a one-line change with its own tiny discussion after a few weeks of living with it.</div>
+  </div>
+  <div class="cal cn commentable" data-id="parked" data-title="Parked, with triggers">
+    <span class="hint-tip">&#x1F4AC; comment</span>
+    <div class="ct">Parked, each with its trigger</div>
+    The open-half ship/hold call fires at the acceptance ticket, on the median latency and the photographs. The default-on discussion fires after weeks of real use. The Terminal Paint per-terminal tint fires when that plugin exposes per-window colour by address &#x2014; the shader side is already done the day it does.
   </div>
   </div>
 </div>
