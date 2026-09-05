@@ -55,6 +55,17 @@ Panel {
   property bool installed: false
   property bool triedInstall: false
 
+  // What `crt doctor` last found. Written whenever the CLI refuses to install
+  // over another owner of decoration:screen_shader.
+  property var doctorDoc: ({})
+  readonly property bool blocked: !!(doctorDoc && doctorDoc.blocked)
+  readonly property var blockers: {
+    var out = []
+    var f = (doctorDoc && doctorDoc.findings) ? doctorDoc.findings : []
+    for (var i = 0; i < f.length; i++) if (f[i] && f[i].severity === "fight") out.push(f[i])
+    return out
+  }
+
   readonly property var panelKnobs: (live && live.panel) ? live.panel : ({})
   readonly property var consts: (live && live.consts) ? live.consts : ({})
   readonly property string channel: (live && live.channel) ? live.channel : "auto"
@@ -174,6 +185,19 @@ Panel {
     }
   }
 
+  FileView {
+    id: doctorFile
+    path: root.stateDir + "/doctor.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      try { root.doctorDoc = JSON.parse(text()) || {} }
+      catch (e) { root.doctorDoc = {} }
+    }
+    onLoadFailed: root.doctorDoc = ({})
+  }
+
   property string lastText: ""
 
   function parse(content) {
@@ -212,7 +236,7 @@ Panel {
     running: true
     repeat: true
     triggeredOnStart: true
-    onTriggered: liveFile.reload()
+    onTriggered: { liveFile.reload(); doctorFile.reload() }
   }
 
   IpcHandler {
@@ -483,7 +507,7 @@ Panel {
 
           Text {
             width: parent.width
-            visible: !root.installed
+            visible: !root.installed && !root.blocked
             text: root.autoInstall
               ? "Wiring the glass into Hyprland — this writes ~/.config/hypr/crt.lua "
                 + "and one require() line, then renders the shader. A moment."
@@ -493,6 +517,40 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
+          }
+
+          // Something else on this box already owns decoration:screen_shader and
+          // will take it back on the next layout event. Installing over that
+          // produces a CRT that works until you move a window, which reads as a
+          // broken plugin — so it refuses, and says what is in the way rather
+          // than leaving a widget that silently does nothing.
+          Column {
+            width: parent.width
+            visible: !root.installed && root.blocked
+            spacing: Style.space(6)
+
+            Text {
+              width: parent.width
+              text: "Not wired in — something else owns the screen shader."
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              wrapMode: Text.WordWrap
+            }
+
+            Repeater {
+              model: root.blockers
+
+              Text {
+                required property var modelData
+                width: parent.width
+                text: "· " + modelData.headline + "\n  " + modelData.detail
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
           }
         }
       }

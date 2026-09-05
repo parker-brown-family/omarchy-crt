@@ -45,21 +45,38 @@ export XDG_DATA_HOME="$HOME/.local/share"
 export XDG_CACHE_HOME="$HOME/.cache"
 mkdir -p "$HOME/.config/hypr" "$XDG_STATE_HOME/omarchy/current/theme"
 
-# A stubbed hyprctl that records what it was asked to do and talks to nothing.
+# A stubbed hyprctl that records what it was asked to do and talks to nothing,
+# and a stubbed systemctl — because conflicts() asks whether td-tubes.service is
+# running, and on this box the answer from the real systemctl is "yes", which
+# would make the test's verdict depend on the developer's desktop.
 mkdir -p "$SANDBOX/bin"
+export HYPRCTL_LOG="$SANDBOX/hyprctl.log"
+export SHADER_STATE="$SANDBOX/screen_shader"
+export TD_TUBES_STATE="$SANDBOX/td-tubes-active"
+: >"$SHADER_STATE"
+echo inactive >"$TD_TUBES_STATE"
+
 cat >"$SANDBOX/bin/hyprctl" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >>"$HYPRCTL_LOG"
-[[ "$1" == "configerrors" ]] && echo "no errors"
+case "$1" in
+  configerrors) echo "no errors" ;;
+  getoption)    echo "str: $(cat "$SHADER_STATE")"; echo "set: true" ;;
+  keyword)      [[ "$2" == "decoration:screen_shader" ]] && printf '%s' "$3" >"$SHADER_STATE" ;;
+esac
 exit 0
 STUB
-chmod +x "$SANDBOX/bin/hyprctl"
-export HYPRCTL_LOG="$SANDBOX/hyprctl.log"
+cat >"$SANDBOX/bin/systemctl" <<'STUB'
+#!/usr/bin/env bash
+[[ "$*" == *"is-active td-tubes.service"* ]] && cat "$TD_TUBES_STATE"
+exit 0
+STUB
+chmod +x "$SANDBOX/bin/hyprctl" "$SANDBOX/bin/systemctl"
 export PATH="$SANDBOX/bin:$PATH"
 
 CRT="$REPO/crt/crt"
 TEMPLATE="$REPO/crt/crt-glass.frag"
-SHADER="$HOME/.config/hypr/shaders/crt-glass.frag"
+SHADER="$XDG_STATE_HOME/omarchy/crt/crt-glass.frag"
 LIVE="$XDG_STATE_HOME/omarchy/crt/live.json"
 
 # A minimal hyprland.lua shaped like Omarchy's, so the require() lands where the
@@ -244,7 +261,20 @@ check "it lands after looknfeel, so it wins over a theme's shader" \
   "$(awk '/require\("hypr.looknfeel"\)/{n=NR} /require\("hypr.crt"\)/{print (NR>n)?"y":"n"}' \
      "$HOME/.config/hypr/hyprland.lua")" "y"
 check 'a passthrough exists for "crt off" to point at' \
-  "$([[ -f "$HOME/.config/hypr/shaders/passthrough.frag" ]] && echo y || echo n)" "y"
+  "$([[ -f "$XDG_STATE_HOME/omarchy/crt/passthrough.frag" ]] && echo y || echo n)" "y"
+
+# ---------------------------------------------------------------------------
+# STAYING OUT OF THE THEME'S WAY.
+#
+# ~/.config/hypr/shaders/ belongs to the terminal-delight theme and to
+# td-tubes, which moves files in and out of it. Nothing this plugin renders may
+# land there — not because it would collide by name today, but because a build
+# output with three owners is a bug waiting for a rename.
+# ---------------------------------------------------------------------------
+check "nothing was written into ~/.config/hypr/shaders/" \
+  "$(find "$HOME/.config/hypr/shaders" -type f 2>/dev/null | wc -l)" "0"
+check "the rendered shader is under the plugin's own state dir" \
+  "$([[ -f "$XDG_STATE_HOME/omarchy/crt/crt-glass.frag" ]] && echo y || echo n)" "y"
 
 # AUTO is only true if it re-derives when the theme moves. Prove the hook is
 # installed AND that running it actually repaints the phosphor.
@@ -276,6 +306,53 @@ check "your knobs survive an uninstall" \
   "$([[ -f "$XDG_STATE_HOME/omarchy/crt/knobs.json" ]] && echo y || echo n)" "y"
 
 # ---------------------------------------------------------------------------
+echo
+echo "it refuses to fight another owner of the screen shader"
+# ---------------------------------------------------------------------------
+# The failure this prevents is invisible: two things re-pointing
+# decoration:screen_shader do not error, they produce a CRT that works until
+# you move a window. That reads as a flaky plugin, not as a conflict.
+# ---------------------------------------------------------------------------
+echo active >"$TD_TUBES_STATE"
+"$CRT" doctor >/dev/null 2>&1
+check "doctor exits non-zero while something will take the shader back" "$?" "1"
+check "and records it for the widget to show" \
+  "$(grep -c '"blocked": true' "$XDG_STATE_HOME/omarchy/crt/doctor.json")" "1"
+check "naming td-tubes" \
+  "$(grep -c 'td-tubes.service is running' "$XDG_STATE_HOME/omarchy/crt/doctor.json")" "1"
+
+"$CRT" try >/dev/null 2>&1
+check "try refuses rather than starting a fight" "$?" "1"
+
+rm -f "$HOME/.config/hypr/crt.lua"
+"$CRT" install >/dev/null 2>&1
+check "install refuses too" "$?" "1"
+check "and wrote no crt.lua while refusing" \
+  "$([[ -f "$HOME/.config/hypr/crt.lua" ]] && echo y || echo n)" "n"
+"$CRT" install --anyway >/dev/null 2>&1
+check "--anyway overrides, for someone who has read the reason" \
+  "$([[ -f "$HOME/.config/hypr/crt.lua" ]] && echo y || echo n)" "y"
+"$CRT" uninstall >/dev/null 2>&1
+
+echo
+echo "try is runtime-only — it writes nothing under ~/.config/hypr"
+# ---------------------------------------------------------------------------
+echo inactive >"$TD_TUBES_STATE"
+printf '%s' "/some/theme/crt-glass.frag" >"$SHADER_STATE"
+CFG_BEFORE="$(find "$HOME/.config/hypr" -type f | sort | xargs sha256sum 2>/dev/null | sha256sum)"
+"$CRT" try >/dev/null 2>&1
+check "try exits clean when nothing is in the way" "$?" "0"
+check "and the compositor now points at us" \
+  "$(cat "$SHADER_STATE")" "$XDG_STATE_HOME/omarchy/crt/crt-glass.frag"
+CFG_AFTER="$(find "$HOME/.config/hypr" -type f | sort | xargs sha256sum 2>/dev/null | sha256sum)"
+check "and not one byte under ~/.config/hypr changed" "$CFG_AFTER" "$CFG_BEFORE"
+check "no theme-set hook was installed by try" \
+  "$([[ -f "$HOOK" ]] && echo y || echo n)" "n"
+
+"$CRT" untry >/dev/null 2>&1
+check "untry puts the previous shader back exactly" \
+  "$(cat "$SHADER_STATE")" "/some/theme/crt-glass.frag"
+
 echo
 echo "the QML is at least syntactically a plugin"
 # ---------------------------------------------------------------------------

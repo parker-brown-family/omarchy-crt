@@ -6,6 +6,12 @@
     crt set SCAN 0.35 VIGN 0.2 service knobs take their raw shader names
     crt channel amber          phosphor: auto | green | amber | white | #RRGGBB
     crt on / crt off           lift the glass off the screen
+
+    crt doctor                 what else on this box wants the screen shader
+    crt try                    test it WITHOUT installing — hyprctl only, no
+                               file written under ~/.config/hypr
+    crt untry                  put the previous shader back
+
     crt install                wire it into Hyprland (once)
     crt uninstall              take it back out
     crt render                 re-render from state (theme-switch hook calls this)
@@ -44,9 +50,15 @@ KNOBS = STATE / "knobs.json"
 TUBES = STATE / "tubes.glsl"
 PLUGIN = Path(__file__).resolve().parent
 TEMPLATE = PLUGIN / "crt-glass.frag"
-SHADER_DIR = HOME / ".config/hypr/shaders"
-SHADER = SHADER_DIR / "crt-glass.frag"
-PASSTHROUGH = SHADER_DIR / "passthrough.frag"
+# The rendered shader lives in the plugin's OWN state directory, not in
+# ~/.config/hypr/shaders/. That directory has two other owners already — the
+# terminal-delight theme installs its per-window warp there, and td-tubes moves
+# files in and out of it (see disabled-by-td-tubes/) — and a build output of
+# ours sitting among them is one more thing for three parties to trip over.
+# Hyprland takes an absolute path, so there was never a reason to share.
+SHADER = STATE / "crt-glass.frag"
+PASSTHROUGH = STATE / "passthrough.frag"
+PREVIOUS = STATE / "previous-shader"
 HYPR = HOME / ".config/hypr"
 CRT_LUA = HYPR / "crt.lua"
 HYPRLAND_LUA = HYPR / "hyprland.lua"
@@ -382,6 +394,144 @@ def write_passthrough():
         "void main() { fragColor = texture(tex, v_texcoord); }\n")
 
 
+def live_shader():
+    """What decoration:screen_shader is set to right now, or None."""
+    out = hyprctl("getoption", "decoration:screen_shader")
+    if not out:
+        return None
+    m = re.search(r"^str:\s*(\S.*?)\s*$", out, re.M)
+    return m.group(1) if m and m.group(1) not in ("", "[[EMPTY]]") else None
+
+
+def conflicts():
+    """Everything on this box that also wants to own the screen shader.
+
+    Returns a list of (severity, headline, detail). Severity 'fight' means it
+    will actively take the shader back off us while we are using it; 'reload'
+    means it wins only at the next Hyprland config reload; 'note' is context.
+
+    This exists because the failure it describes is invisible. Two owners
+    re-pointing the same setting does not error — it produces a CRT that works
+    until you move a window, which reads as a flaky plugin rather than as two
+    programs disagreeing.
+    """
+    out = []
+
+    unit = subprocess.run(["systemctl", "--user", "is-active", "td-tubes.service"],
+                          capture_output=True, text=True).stdout.strip() \
+        if shutil.which("systemctl") else ""
+    if unit == "active":
+        out.append(("fight", "td-tubes.service is running",
+                    "It re-applies decoration:screen_shader on every Hyprland layout "
+                    "event, pointing at the staged theme's crt-glass.frag. It will "
+                    "take the shader back the moment a window moves.\n"
+                    "    stop it:  systemctl --user stop td-tubes.service\n"
+                    "    later:    systemctl --user start td-tubes.service"))
+
+    looknfeel = HYPR / "looknfeel.lua"
+    if looknfeel.exists() and "screen_shader" in looknfeel.read_text():
+        out.append(("reload", "looknfeel.lua sets screen_shader",
+                    "The terminal-delight theme's managed block. It wins at the next "
+                    "Hyprland reload unless hypr.crt is required after it, which is "
+                    "what `crt install` arranges. `crt try` does not touch it."))
+
+    if STAGED_COLORS.parent.joinpath("crt-glass.frag").exists():
+        out.append(("note", "the staged theme ships its own crt-glass.frag",
+                    "So the theme's CRT is installed and available. Nothing here "
+                    "overwrites it; the two are separate files with separate knobs."))
+
+    now = live_shader()
+    if now:
+        who = ("this plugin" if str(SHADER) == now
+               else "the theme" if "current/theme" in now
+               else "passthrough" if "passthrough" in now
+               else "something else")
+        out.append(("note", f"screen_shader is currently {who}", f"    {now}"))
+
+    if HYPRLAND_LUA.exists() and REQUIRE in HYPRLAND_LUA.read_text():
+        out.append(("note", "hypr.crt is wired into hyprland.lua",
+                    "`crt install` has been run. `crt uninstall` takes it back out."))
+
+    return out
+
+
+def doctor():
+    found = conflicts()
+    fights = [c for c in found if c[0] == "fight"]
+
+    # Persist it, so the bar widget can say WHY it did not wire itself in. A
+    # widget that silently does nothing on first open is indistinguishable from
+    # a broken install, and the reason is two directories away in a terminal
+    # the user is not looking at.
+    STATE.mkdir(parents=True, exist_ok=True)
+    tmp = STATE / "doctor.json.new"
+    tmp.write_text(json.dumps(
+        {"blocked": bool(fights),
+         "findings": [{"severity": s, "headline": h, "detail": d} for s, h, d in found]},
+        indent=2) + "\n")
+    tmp.replace(STATE / "doctor.json")
+
+    print("crt doctor\n")
+    if not found:
+        print("  nothing else on this box wants the screen shader.")
+    for sev, head, detail in found:
+        mark = {"fight": "FIGHT", "reload": "wins at reload", "note": "note"}[sev]
+        print(f"  [{mark}] {head}")
+        for line in detail.splitlines():
+            print(f"    {line}" if not line.startswith("    ") else line)
+        print()
+    if fights:
+        print("  Something will take the shader back off you while you are using it.")
+        print("  Park it first, or the CRT will look intermittent rather than wrong.")
+    return 1 if fights else 0
+
+
+def try_on():
+    """Test the glass without installing anything.
+
+    Renders, remembers whatever screen_shader was pointing at, and re-points it
+    at us — through hyprctl only. No hyprland.lua edit, no crt.lua, no
+    theme-set hook, nothing written under ~/.config/hypr at all. A Hyprland
+    reload undoes it on its own, and `crt untry` undoes it now.
+    """
+    found = conflicts()
+    for sev, head, detail in found:
+        if sev == "fight":
+            print(f"crt: {head} — it will take the shader back on the next layout event.",
+                  file=sys.stderr)
+            for line in detail.splitlines():
+                print(f"  {line}", file=sys.stderr)
+            print("\ncrt: refusing to try over it. Park it, then run `crt try` again.",
+                  file=sys.stderr)
+            return 1
+
+    st = load()
+    write_passthrough()
+    render(st)
+    before = live_shader()
+    STATE.mkdir(parents=True, exist_ok=True)
+    PREVIOUS.write_text((before or "") + "\n")
+    set_shader(SHADER)
+    print(f"trying {SHADER}")
+    print(f"  was:  {before or '(nothing set)'}")
+    print("  nothing was written under ~/.config/hypr — `crt untry` or a Hyprland")
+    print("  reload puts it back.")
+    return 0
+
+
+def untry():
+    before = PREVIOUS.read_text().strip() if PREVIOUS.exists() else ""
+    if before:
+        set_shader(before)
+        print(f"put back: {before}")
+    else:
+        write_passthrough()
+        set_shader(PASSTHROUGH)
+        print("nothing was set before — pointed at the passthrough")
+    PREVIOUS.unlink(missing_ok=True)
+    return 0
+
+
 def commit(st):
     """Render first, save only if it rendered.
 
@@ -529,11 +679,25 @@ def main(argv):
         show(load())
         return
     if cmd == "install":
+        # Installing on top of something that fights us produces a CRT that
+        # works until a window moves. Say so and stop; `crt install --anyway`
+        # is there for when you have read the reason and disagree.
+        if any(c[0] == "fight" for c in conflicts()) and "--anyway" not in rest:
+            doctor()
+            print("crt: not installing over that. `crt install --anyway` overrides.",
+                  file=sys.stderr)
+            raise SystemExit(1)
         install()
         return
     if cmd == "uninstall":
         uninstall()
         return
+    if cmd == "doctor":
+        raise SystemExit(doctor())
+    if cmd == "try":
+        raise SystemExit(try_on())
+    if cmd == "untry":
+        raise SystemExit(untry())
 
     st = load()
 
