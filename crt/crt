@@ -1,0 +1,588 @@
+#!/usr/bin/env python3
+"""crt — the front panel of the desktop's cathode ray tube.
+
+    crt                        what every knob is set to right now
+    crt set BARREL 0.7         turn a knob (repeat pairs for several)
+    crt set SCAN 0.35 VIGN 0.2 service knobs take their raw shader names
+    crt channel amber          phosphor: auto | green | amber | white | #RRGGBB
+    crt on / crt off           lift the glass off the screen
+    crt install                wire it into Hyprland (once)
+    crt uninstall              take it back out
+    crt render                 re-render from state (theme-switch hook calls this)
+
+WHY THERE IS A RENDERER AT ALL. Hyprland screen shaders take no uniforms and
+have no IPC to set one, so "changing a setting" means rewriting the shader's
+const block and recompiling — a few milliseconds, no relogin. The mistake worth
+not repeating is doing that rewrite IN PLACE: the file then carries both the
+defaults and your settings, and the two can no longer be told apart. So the
+template under this plugin is read-only, the settings live in
+
+    $XDG_STATE_HOME/omarchy/crt/knobs.json
+
+and the live shader at ~/.config/hypr/shaders/crt-glass.frag is a build output
+that can be deleted at any time and rebuilt from those two.
+
+TWO TIERS OF KNOB. The front panel is four dials, because a real set had four:
+BARREL, FADE and TRACKING each drive a group of shader constants, and CHANNEL
+picks the phosphor. Behind that, every one of the twenty-two constants is
+reachable by its own name, and a service knob set by hand outranks the macro
+that would otherwise cover it — until you turn that macro again.
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HOME = Path.home()
+STATE = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "omarchy/crt"
+KNOBS = STATE / "knobs.json"
+TUBES = STATE / "tubes.glsl"
+PLUGIN = Path(__file__).resolve().parent
+TEMPLATE = PLUGIN / "crt-glass.frag"
+SHADER_DIR = HOME / ".config/hypr/shaders"
+SHADER = SHADER_DIR / "crt-glass.frag"
+PASSTHROUGH = SHADER_DIR / "passthrough.frag"
+HYPR = HOME / ".config/hypr"
+CRT_LUA = HYPR / "crt.lua"
+HYPRLAND_LUA = HYPR / "hyprland.lua"
+THEME_HOOK = (
+    Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+    / "omarchy/hooks/theme-set.d/crt-rerender.hook"
+)
+STAGED_COLORS = (
+    Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state"))
+    / "omarchy/current/theme/colors.toml"
+)
+
+BEGIN = "-- >>> omarchy-crt (managed by `crt install`) >>>"
+END = "-- <<< omarchy-crt <<<"
+REQUIRE = 'require("hypr.crt")  -- omarchy-crt'
+
+
+# ---------------------------------------------------------------- the panel
+#
+# Each macro spreads over a group of constants. The multipliers are chosen so
+# that the DEFAULTS below reproduce the shipped template byte for byte — a
+# fresh install renders exactly the shader the theme used to ship, and the
+# dials start where that shader already was rather than at some round number
+# nobody picked.
+
+PANEL = {
+    "BARREL":   {"TUBE_K1": 0.26, "TUBE_K2": 0.11},
+    "FADE":     {"BLOOM": 0.55, "GLOW": 0.63, "VIGN": 0.50},
+    "TRACKING": {"TRACKING": 1.00},
+}
+PANEL_DEFAULTS = {"BARREL": 0.55, "FADE": 0.64, "TRACKING": 0.60}
+
+# Motion costs Hyprland's damage tracking (the time uniform forces a full-screen
+# redraw every frame), so the clock follows these three rather than being a
+# fourth thing to remember.
+MOTION = ("TRACKING", "FLICKER", "JIGGLE")
+
+CHANNELS = {
+    # name:    (phosphor, glare)   glare is the room light caught on the glass,
+    #                              so it is near-white in every real tube.
+    "green": ("#22C55E", "#B7FFC7"),   # P1  — the classic
+    "amber": ("#FFB000", "#FFE0A3"),   # P3  — the other classic
+    "white": ("#D8E2F0", "#FFFFFF"),   # P4  — a paper-white VDU
+}
+
+
+def die(msg):
+    print(f"crt: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+# --------------------------------------------------------------------- state
+
+
+def load():
+    st = {
+        "panel": dict(PANEL_DEFAULTS),
+        "service": {},
+        "channel": "auto",
+        "on": True,
+    }
+    if KNOBS.exists():
+        try:
+            got = json.loads(KNOBS.read_text())
+        except (OSError, ValueError) as e:
+            die(f"{KNOBS} is not readable JSON ({e}) — delete it to start over")
+        for k in ("panel", "service"):
+            if isinstance(got.get(k), dict):
+                st[k].update(got[k])
+        if isinstance(got.get("channel"), str):
+            st["channel"] = got["channel"]
+        # An absent "on" is not "off": a state file written before the key
+        # existed means nobody has said, and the glass stays where it was.
+        if isinstance(got.get("on"), bool):
+            st["on"] = got["on"]
+    return st
+
+
+def save(st):
+    STATE.mkdir(parents=True, exist_ok=True)
+    tmp = KNOBS.with_suffix(".json.new")
+    tmp.write_text(json.dumps(st, indent=2, sort_keys=True) + "\n")
+    tmp.replace(KNOBS)
+
+
+# -------------------------------------------------------------------- colour
+
+
+def hex_to_vec3(h):
+    h = h.strip().lstrip("#")
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", h):
+        die(f"'{h}' is not a #RRGGBB colour")
+    r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    return r, g, b
+
+
+def lift(rgb, t=0.55):
+    """Toward white — a glare tint derived from a phosphor when none is given."""
+    return tuple(c + (1.0 - c) * t for c in rgb)
+
+
+def theme_colours():
+    """PHOSPHOR and GLARE_TINT from whatever theme is staged right now.
+
+    `accent` and `bright_foreground` are the two keys every one of the 22 stock
+    Omarchy themes carries, which is what makes AUTO safe to default to. When
+    no theme is staged at all the answer is not black — it is *unknown*, and
+    the caller falls back to the template's own colours rather than inventing
+    one.
+    """
+    if not STAGED_COLORS.exists():
+        return None
+    try:
+        import tomllib
+        doc = tomllib.loads(STAGED_COLORS.read_text())
+    except Exception:
+        return None
+    accent = doc.get("accent")
+    if not isinstance(accent, str):
+        return None
+    ph = hex_to_vec3(accent)
+    bf = doc.get("bright_foreground")
+    gl = hex_to_vec3(bf) if isinstance(bf, str) else lift(ph)
+    return ph, gl
+
+
+def resolve_channel(name):
+    """-> (phosphor, glare, label) or None to leave the template's own colours."""
+    if name == "auto":
+        got = theme_colours()
+        if got is None:
+            return None
+        return got[0], got[1], "auto"
+    if name in CHANNELS:
+        ph, gl = CHANNELS[name]
+        return hex_to_vec3(ph), hex_to_vec3(gl), name
+    if name.startswith("#"):
+        ph = hex_to_vec3(name)
+        return ph, lift(ph), name
+    die(f"no such channel: {name} — auto, {', '.join(CHANNELS)}, or #RRGGBB")
+
+
+# --------------------------------------------------------------------- render
+
+
+def template():
+    if not TEMPLATE.exists():
+        die(f"template missing at {TEMPLATE}")
+    return TEMPLATE.read_text()
+
+
+def known_knobs(text):
+    return set(re.findall(r"^const float ([A-Z_0-9]+)\s*=", text, re.M))
+
+
+def glsl(v):
+    """A float literal GLSL will accept.
+
+    GLSL ES has no implicit int-to-float conversion in a const initializer, so
+    `const float SCAN = 0;` is a compile error while `= 0.0` is fine. Python's
+    %g drops the decimal point on any whole number, which meant turning ANY
+    knob to zero — far and away the most likely thing anyone does with a knob —
+    produced a shader that would not compile. The validator caught it and left
+    the previous shader in place, so nothing broke; the knob just did nothing,
+    which is the worse failure of the two because it looks like the feature.
+    """
+    s = f"{float(v):.6g}"
+    return s if any(c in s for c in ".eE") else s + ".0"
+
+
+def expand(st):
+    """panel macros -> shader constants, then service overrides on top."""
+    out = {}
+    for macro, group in PANEL.items():
+        v = float(st["panel"].get(macro, PANEL_DEFAULTS[macro]))
+        for const, scale in group.items():
+            out[const] = round(v * scale, 4)
+    out.update({k: float(v) for k, v in st["service"].items()})
+    return out
+
+
+def render(st, path=None):
+    text = template()
+    valid = known_knobs(text)
+
+    for k, v in expand(st).items():
+        if k not in valid:
+            die(f"no such knob: {k}")
+        text, n = re.subn(
+            rf"^(const float {k}\s*=\s*)-?[0-9.]+(;.*)$",
+            lambda m: f"{m.group(1)}{glsl(v)}{m.group(2)}",
+            text, count=1, flags=re.M)
+        if n != 1:
+            die(f"could not set {k} in the template")
+
+    # The clock follows the motion knobs, unless the service tier names
+    # ANIMATED by hand.
+    #
+    # Read the RENDERED text, not the override dict. A knob nobody has touched
+    # is not zero — it is whatever the template says, and the template ships
+    # FLICKER at 0.35. Deciding from the overrides alone compiled the clock
+    # away whenever the only motion left was a default, which does not turn
+    # flicker off: it leaves FLICKER at 0.35 with a frozen clock, so the shader
+    # claims a burst it can never draw.
+    if "ANIMATED" in st["service"]:
+        animated = 1 if float(st["service"]["ANIMATED"]) else 0
+    else:
+        rendered = {m.group(1): float(m.group(2)) for m in
+                    re.finditer(r"^const float ([A-Z_0-9]+)\s*=\s*(-?[0-9.]+)", text, re.M)}
+        animated = 1 if any(rendered.get(m, 0.0) > 0.0 for m in MOTION) else 0
+    text = re.sub(r"^(#define ANIMATED\s+)[01]", rf"\g<1>{animated}", text, count=1, flags=re.M)
+
+    ch = resolve_channel(st["channel"])
+    if ch is not None:
+        ph, gl, _ = ch
+        text = re.sub(r"^(const vec3  PHOSPHOR   = )vec3\([^)]*\);",
+                      rf"\g<1>vec3({ph[0]:.3f}, {ph[1]:.3f}, {ph[2]:.3f});",
+                      text, count=1, flags=re.M)
+        text = re.sub(r"^(const vec3  GLARE_TINT = )vec3\([^)]*\);",
+                      rf"\g<1>vec3({gl[0]:.3f}, {gl[1]:.3f}, {gl[2]:.3f});",
+                      text, count=1, flags=re.M)
+
+    # Tubes are runtime state and live outside the template entirely.
+    if TUBES.exists():
+        block = TUBES.read_text()
+        text = re.sub(
+            r"(// ---- TUBE DATA[^\n]*\n).*?(// ---- END TUBE DATA ----)",
+            lambda m: m.group(1) + block.rstrip("\n") + "\n" + m.group(2),
+            text, count=1, flags=re.S)
+
+    out = Path(path) if path else SHADER
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    # Validate a scratch copy BEFORE it can reach the live compositor. A knob
+    # that does not compile leaves the previous shader exactly where it was.
+    if shutil.which("glslangValidator"):
+        with tempfile.NamedTemporaryFile("w", suffix=".frag", delete=False) as f:
+            f.write(text)
+            probe = f.name
+        try:
+            r = subprocess.run(["glslangValidator", probe],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                die("that does not compile — nothing applied\n" + r.stdout + r.stderr)
+        finally:
+            os.unlink(probe)
+    else:
+        print("warning: glslangValidator not installed; applying unvalidated",
+              file=sys.stderr)
+
+    out.write_text(text)
+    if out == SHADER:
+        publish(st, text)
+    return out
+
+
+def publish(st, text):
+    """Write what was actually compiled, for anything that draws a UI.
+
+    knobs.json is what you asked for; live.json is what the glass is. They are
+    different documents and conflating them is how a dial ends up showing a
+    setting that never reached the screen — AUTO with no theme staged resolves
+    to no colour at all, and a panel reading the request would happily draw the
+    theme's accent over a shader that is still using the template's.
+    """
+    ch = resolve_channel(st["channel"])
+    consts = {m.group(1): float(m.group(2))
+              for m in re.finditer(r"^const float ([A-Z_0-9]+)\s*=\s*(-?[0-9.]+)", text, re.M)}
+    animated = re.search(r"^#define ANIMATED\s+([01])", text, re.M)
+
+    def hexof(group):
+        m = re.search(rf"^const vec3  {group} += vec3\(([^)]*)\);", text, re.M)
+        if not m:
+            return None
+        r, g, b = (float(x) for x in m.group(1).split(","))
+        return "#%02X%02X%02X" % tuple(round(c * 255) for c in (r, g, b))
+
+    doc = {
+        "on": st["on"],
+        "channel": st["channel"],
+        # Resolved, or null when AUTO found no theme to resolve against. Null
+        # is not black here: it is "nobody said", and the panel says so.
+        "channelResolved": ch[2] if ch else None,
+        "phosphor": hexof("PHOSPHOR"),
+        "glare": hexof("GLARE_TINT"),
+        "animated": int(animated.group(1)) if animated else 0,
+        "panel": {k: st["panel"].get(k, PANEL_DEFAULTS[k]) for k in PANEL_DEFAULTS},
+        "consts": consts,
+        "shader": str(SHADER),
+    }
+    STATE.mkdir(parents=True, exist_ok=True)
+    tmp = STATE / "live.json.new"
+    tmp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    tmp.replace(STATE / "live.json")
+
+
+# --------------------------------------------------------------------- hypr
+
+
+def hyprctl(*args):
+    if not shutil.which("hyprctl"):
+        return None
+    return subprocess.run(["hyprctl", *args], capture_output=True, text=True).stdout
+
+
+def set_shader(path):
+    """Hyprland 0.56's Lua config retired `hyprctl keyword` — and it fails
+    SOFTLY, printing a line and changing nothing, so a redirect to /dev/null
+    reads as success. Try keyword for older builds, detect the refusal in its
+    output, and drive hl.config through eval where the config is Lua."""
+    out = hyprctl("keyword", "decoration:screen_shader", str(path))
+    if out is not None and "non-legacy" in out:
+        hyprctl("eval", f'hl.config({{ decoration = {{ screen_shader = "{path}" }} }})')
+
+
+def write_passthrough():
+    """screen_shader cannot be turned OFF — assigning "" leaves whatever path
+    was in effect. Off therefore means pointing at a shader that does nothing,
+    and that shader has to exist or every render re-stats a missing path and
+    Hyprland raises it in the persistent error bar (screencopy included, so
+    every screenshot trips it)."""
+    if PASSTHROUGH.exists():
+        return
+    PASSTHROUGH.parent.mkdir(parents=True, exist_ok=True)
+    PASSTHROUGH.write_text(
+        "#version 320 es\n"
+        "// omarchy-crt — plain glass. `crt off` points here, because Hyprland\n"
+        "// has no way to unset a screen shader.\n"
+        "precision highp float;\n"
+        "in vec2 v_texcoord;\n"
+        "uniform sampler2D tex;\n"
+        "out vec4 fragColor;\n"
+        "void main() { fragColor = texture(tex, v_texcoord); }\n")
+
+
+def commit(st):
+    """Render first, save only if it rendered.
+
+    The order matters more than it looks. Validating the shader stops a bad
+    value reaching the compositor, but if the value has already been written to
+    knobs.json it has reached something worse: `crt set GAMMA 0` used to save,
+    then fail to compile, then fail to compile on every later command too —
+    the tool bricked itself over one typo and the only way out was deleting a
+    file nobody mentions. A setting that was refused was never a setting.
+    """
+    apply(st)
+    save(st)
+
+
+def apply(st):
+    write_passthrough()
+    out = render(st)
+    if not shutil.which("hyprctl"):
+        print(f"wrote {out} — applies at next login (hyprctl not found)")
+        return
+    # Re-setting the same path is a no-op, so drop and re-set to force a
+    # recompile of the file we just changed.
+    set_shader(PASSTHROUGH)
+    if st["on"]:
+        set_shader(out)
+    errs = (hyprctl("configerrors") or "").strip()
+    if errs and "no errors" not in errs:
+        print(errs, file=sys.stderr)
+
+
+# -------------------------------------------------------------------- install
+
+
+def strip_block(text):
+    return re.sub(re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?", "", text, flags=re.S)
+
+
+def install():
+    HYPR.mkdir(parents=True, exist_ok=True)
+    CRT_LUA.write_text(f"""{BEGIN}
+-- The whole-desktop CRT. `crt` renders the shader from the template in the
+-- plugin plus your knobs in $XDG_STATE_HOME/omarchy/crt/knobs.json.
+--
+-- This file is require()d from hyprland.lua AFTER hypr.looknfeel, so it wins
+-- over a theme that also sets screen_shader. That ordering is the whole reason
+-- the CRT can outlive a theme switch: the picture is the plugin's, the colours
+-- come from whatever theme happens to be on.
+local frag = os.getenv("HOME") .. "/.config/hypr/shaders/crt-glass.frag"
+local probe = io.open(frag, "r")
+if probe then
+  probe:close()
+  hl.config({{ decoration = {{ screen_shader = frag }} }})
+end
+{END}
+""")
+
+    if not HYPRLAND_LUA.exists():
+        die(f"{HYPRLAND_LUA} does not exist — is this an Omarchy box?")
+    text = HYPRLAND_LUA.read_text()
+    if REQUIRE not in text:
+        anchor = 'require("hypr.looknfeel")'
+        if anchor in text:
+            text = text.replace(anchor, anchor + "\n" + REQUIRE, 1)
+        else:
+            text = text.rstrip("\n") + "\n" + REQUIRE + "\n"
+        HYPRLAND_LUA.write_text(text)
+        print(f"wired {REQUIRE} into {HYPRLAND_LUA}")
+    else:
+        print(f"already wired into {HYPRLAND_LUA}")
+
+    write_theme_hook()
+    st = load()
+    commit(st)
+    print(f"rendered {SHADER}")
+    show(st)
+
+
+def write_theme_hook():
+    """Re-render when the theme changes, so CHANNEL AUTO means anything.
+
+    Omarchy runs every executable in hooks/theme-set.d/ after a theme switch.
+    Without this the phosphor derived from a theme's accent would go stale the
+    moment you switched away from it, and only catch up the next time somebody
+    happened to run `crt` — which is to say, AUTO would be a setting that was
+    true when you chose it and quietly wrong afterwards.
+    """
+    THEME_HOOK.parent.mkdir(parents=True, exist_ok=True)
+    THEME_HOOK.write_text(f"""#!/bin/bash
+# Installed by omarchy-crt's `crt install`.
+#
+# Omarchy passes the new theme's snake-cased name as $1; it is unused, because
+# `crt render` reads the freshly staged colors.toml itself rather than trusting
+# a name to map to a palette. Only CHANNEL AUTO actually changes anything here
+# — an explicit channel renders identical output and the write is a no-op.
+'{PLUGIN / "crt"}' render >/dev/null 2>&1
+exit 0
+""")
+    THEME_HOOK.chmod(0o755)
+
+
+def uninstall():
+    if HYPRLAND_LUA.exists():
+        text = HYPRLAND_LUA.read_text()
+        if REQUIRE in text:
+            HYPRLAND_LUA.write_text(re.sub(rf"^{re.escape(REQUIRE)}\n?", "", text, flags=re.M))
+    CRT_LUA.unlink(missing_ok=True)
+    THEME_HOOK.unlink(missing_ok=True)
+    SHADER.unlink(missing_ok=True)
+    write_passthrough()
+    set_shader(PASSTHROUGH)
+    print("uninstalled — knobs.json kept, so `crt install` picks up where you left off")
+
+
+# ----------------------------------------------------------------------- show
+
+
+def show(st):
+    ch = resolve_channel(st["channel"])
+    src = ""
+    if st["channel"] == "auto":
+        src = " (from the staged theme)" if ch else " (no theme staged — template colours)"
+    print(f"  {'GLASS':<10} {'on' if st['on'] else 'off'}")
+    for k in ("BARREL", "FADE", "TRACKING"):
+        v = st["panel"].get(k, PANEL_DEFAULTS[k])
+        print(f"  {k:<10} {v:.2f}   {round(v * 100):>3d}%")
+    print(f"  {'CHANNEL':<10} {st['channel']}{src}")
+    if st["service"]:
+        print("\n  service panel:")
+        for k in sorted(st["service"]):
+            print(f"    {k:<14} {st['service'][k]}")
+    print(f"\n  template {TEMPLATE}\n  state    {KNOBS}\n  shader   {SHADER}")
+
+
+# ------------------------------------------------------------------------ cli
+
+
+def main(argv):
+    cmd = argv[0] if argv else "list"
+    rest = argv[1:]
+
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__.split("WHY THERE IS")[0].rstrip())
+        return
+    if cmd == "list":
+        show(load())
+        return
+    if cmd == "install":
+        install()
+        return
+    if cmd == "uninstall":
+        uninstall()
+        return
+
+    st = load()
+
+    if cmd == "render":
+        # No hyprctl side effects: the theme-switch hook calls this, and a
+        # theme switch is already reloading Hyprland.
+        render(st)
+        return
+    if cmd == "set":
+        if not rest or len(rest) % 2:
+            die("set wants KNOB VALUE pairs")
+        valid = known_knobs(template())
+        for k, v in zip(rest[::2], rest[1::2]):
+            k = k.upper()
+            try:
+                fv = float(v)
+            except ValueError:
+                die(f"'{v}' is not a number")
+            if k in PANEL:
+                st["panel"][k] = max(0.0, min(1.0, fv))
+                # Turning a macro takes back the constants it owns, so the dial
+                # and the picture cannot disagree about who is in charge.
+                for const in PANEL[k]:
+                    st["service"].pop(const, None)
+            elif k in valid or k == "ANIMATED":
+                st["service"][k] = fv
+            else:
+                die(f"no such knob: {k} (`crt` to list)")
+        commit(st)
+        show(st)
+        return
+    if cmd == "channel":
+        if not rest:
+            print(st["channel"])
+            return
+        name = rest[0]
+        resolve_channel(name)          # validates, or dies
+        st["channel"] = name
+        commit(st)
+        show(st)
+        return
+    if cmd in ("on", "off"):
+        st["on"] = cmd == "on"
+        commit(st)
+        print("glass on" if st["on"] else "glass lifted")
+        return
+
+    die(f"unknown command '{cmd}' — crt [list|set|channel|on|off|install|uninstall|render]")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

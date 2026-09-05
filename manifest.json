@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "id": "brownfamilysports.crt",
+  "name": "Delight-O-Matic",
+  "version": "0.1.0",
+  "author": "Parker Brown",
+  "license": "MIT",
+  "description": "Curved glass, scanlines and a phosphor glow over the whole desktop — on any Omarchy theme",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Delight-O-Matic",
+    "description": "The front panel of the set: four knobs — BARREL, FADE, TRACKING, CHANNEL — turning the desktop's CRT glass, with the rest of the tube behind a service flap.",
+    "category": "Appearance",
+    "allowMultiple": false,
+    "defaults": {
+      "showPercent": true,
+      "autoInstall": true
+    },
+    "schema": [
+      {
+        "key": "showPercent",
+        "type": "boolean",
+        "label": "Show a percentage under each knob",
+        "defaultValue": true
+      },
+      {
+        "key": "autoInstall",
+        "type": "boolean",
+        "label": "Wire the shader into Hyprland on first run",
+        "defaultValue": true,
+        "description": "Writes ~/.config/hypr/crt.lua and a single require() line into hyprland.lua, then renders the shader. Turn this off to install by hand with `crt install`."
+      }
+    ]
+  }
+}

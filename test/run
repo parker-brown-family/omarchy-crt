@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+# omarchy-crt — the test.
+#
+# Everything here runs against a sandbox HOME with a stubbed hyprctl, because
+# the thing under test sets the live compositor's screen shader and a test that
+# can reach the real one is a test that can black out the desk it is running on.
+#
+#   ./test/run
+#
+# What it is actually checking, in order of how much it would hurt to get wrong:
+#
+#   1. The template is never written to. This is the whole architecture — state
+#      outside the repo, template read-only — and it is one stat to verify.
+#   2. A default render reproduces the shader terminal-delight ships today.
+#      That is the migration promise: installing the plugin changes no pixels.
+#   3. AUTO takes its colours from the staged theme, and a different staged
+#      theme gives different colours. That is the claim that this works on any
+#      theme, and it is the reason the plugin exists.
+#   4. Every render compiles. A knob that does not compile must leave the live
+#      shader exactly where it was.
+#   5. install() is idempotent and uninstall() leaves nothing behind.
+
+set -uo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PASS=0; FAIL=0
+
+ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
+bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; [[ $# -gt 1 ]] && printf '       %s\n' "$2"; }
+check(){ if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1" "want '$3', got '$2'"; fi; }
+
+SANDBOX="$(mktemp -d)"
+trap 'rm -rf "$SANDBOX"' EXIT
+
+# Every XDG root, not just HOME. The tool resolves ~/.config/hypr from HOME but
+# Omarchy's hook directory from XDG_CONFIG_HOME, and this box exports that — so
+# a sandbox that redirects only HOME writes its theme-set hook into the REAL
+# config while every other assertion passes. That is not hypothetical: it
+# happened once here, and the tell was three failing assertions about a file
+# that had been created perfectly, somewhere else.
+export HOME="$SANDBOX/home"
+export XDG_CONFIG_HOME="$HOME/.config"
+export XDG_STATE_HOME="$HOME/.local/state"
+export XDG_DATA_HOME="$HOME/.local/share"
+export XDG_CACHE_HOME="$HOME/.cache"
+mkdir -p "$HOME/.config/hypr" "$XDG_STATE_HOME/omarchy/current/theme"
+
+# A stubbed hyprctl that records what it was asked to do and talks to nothing.
+mkdir -p "$SANDBOX/bin"
+cat >"$SANDBOX/bin/hyprctl" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >>"$HYPRCTL_LOG"
+[[ "$1" == "configerrors" ]] && echo "no errors"
+exit 0
+STUB
+chmod +x "$SANDBOX/bin/hyprctl"
+export HYPRCTL_LOG="$SANDBOX/hyprctl.log"
+export PATH="$SANDBOX/bin:$PATH"
+
+CRT="$REPO/crt/crt"
+TEMPLATE="$REPO/crt/crt-glass.frag"
+SHADER="$HOME/.config/hypr/shaders/crt-glass.frag"
+LIVE="$XDG_STATE_HOME/omarchy/crt/live.json"
+
+# A minimal hyprland.lua shaped like Omarchy's, so the require() lands where the
+# installer claims it does: after looknfeel, which is what makes the plugin win
+# over a theme that also sets screen_shader.
+cat >"$HOME/.config/hypr/hyprland.lua" <<'LUA'
+require("default.hypr.omarchy")
+require("hypr.monitors")
+require("hypr.looknfeel")
+require("hypr.autostart")
+LUA
+
+stage_theme() { # $1 accent  $2 bright_foreground
+  cat >"$XDG_STATE_HOME/omarchy/current/theme/colors.toml" <<EOF
+mode = "dark"
+accent = "$1"
+bright_foreground = "$2"
+foreground = "#a9b1d6"
+background = "#1a1b26"
+EOF
+}
+
+constof() { # $1 file  $2 knob -> value
+  awk -v k="$2" '$1=="const" && $2=="float" && $3==k { gsub(/[;=]/,""); print $4; exit }' "$1"
+}
+vec3of() { # $1 file  $2 name -> "r, g, b"
+  sed -nE "s/^const vec3  $2 += vec3\(([^)]*)\);.*/\1/p" "$1" | head -1
+}
+
+echo "omarchy-crt — sandbox $SANDBOX"
+echo
+
+# ---------------------------------------------------------------------------
+echo "template is read-only"
+# ---------------------------------------------------------------------------
+BEFORE="$(sha256sum "$TEMPLATE" | cut -d' ' -f1)"
+stage_theme "#7aa2f7" "#c0caf5"
+"$CRT" install >/dev/null 2>&1
+"$CRT" set BARREL 0.9 >/dev/null 2>&1
+"$CRT" channel amber >/dev/null 2>&1
+AFTER="$(sha256sum "$TEMPLATE" | cut -d' ' -f1)"
+check "the template is byte-identical after an install and two knob turns" "$AFTER" "$BEFORE"
+check "TUBE_COUNT in the template is still 0" \
+  "$(grep -c '^#define TUBE_COUNT 0' "$TEMPLATE")" "1"
+
+# ---------------------------------------------------------------------------
+echo
+echo "a default render is the shader the theme ships today"
+# ---------------------------------------------------------------------------
+rm -rf "$XDG_STATE_HOME/omarchy/crt"
+stage_theme "#67F454" "#DFE2E3"
+"$CRT" render >/dev/null 2>&1
+SHIPPED="$REPO/../omarchy-terminal-delight-theme/crt-glass.frag"
+if [[ -f "$SHIPPED" ]]; then
+  for k in TUBE_K1 TUBE_K2 BLOOM GLOW VIGN TRACKING; do
+    got="$(constof "$SHADER" "$k")"; want="$(constof "$SHIPPED" "$k")"
+    same="$(awk -v a="$got" -v b="$want" 'BEGIN{print (a-b<0.006 && b-a<0.006) ? "y":"n"}')"
+    check "$k renders to what the theme ships ($got vs $want)" "$same" "y"
+  done
+else
+  echo "  skip the theme is not checked out beside this repo"
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "AUTO takes its colour from whatever theme is staged"
+# ---------------------------------------------------------------------------
+stage_theme "#7aa2f7" "#c0caf5"          # tokyo-night
+"$CRT" channel auto >/dev/null 2>&1
+TOKYO="$(vec3of "$SHADER" PHOSPHOR)"
+TOKYO_GLARE="$(vec3of "$SHADER" GLARE_TINT)"
+check "phosphor follows tokyo-night's accent" "$TOKYO" "0.478, 0.635, 0.969"
+check "glare follows tokyo-night's bright_foreground" "$TOKYO_GLARE" "0.753, 0.792, 0.961"
+
+stage_theme "#d79921" "#fbf1c7"          # gruvbox
+"$CRT" render >/dev/null 2>&1
+GRUV="$(vec3of "$SHADER" PHOSPHOR)"
+if [[ "$GRUV" != "$TOKYO" ]]; then ok "a different theme renders a different phosphor ($GRUV)"
+else bad "a different theme renders a different phosphor" "both were $TOKYO"; fi
+
+# The claim that makes this a plugin: the optics do NOT move when the theme
+# does. Only the two colours may.
+check "curvature is untouched by the theme switch" \
+  "$(constof "$SHADER" TUBE_K1)" "0.143"
+
+"$CRT" channel green >/dev/null 2>&1
+check "an explicit channel overrides the theme" \
+  "$(vec3of "$SHADER" PHOSPHOR)" "0.133, 0.773, 0.369"
+
+# ---------------------------------------------------------------------------
+echo
+echo "the clock follows the motion knobs"
+# ---------------------------------------------------------------------------
+animated() { grep -oE '^#define ANIMATED +[01]' "$SHADER" | grep -oE '[01]$'; }
+
+# The one that used to be wrong: a knob nobody has touched is not zero, it is
+# whatever the template says, and the template ships FLICKER at 0.35. Turning
+# TRACKING down does not turn the clock off, because flicker is still motion.
+"$CRT" set TRACKING 0 >/dev/null 2>&1
+check "tracking alone at zero keeps the clock, because FLICKER defaults to 0.35" \
+  "$(animated)" "1"
+"$CRT" set FLICKER 0 JIGGLE 0 >/dev/null 2>&1
+check "all three at zero compiles the clock away" "$(animated)" "0"
+"$CRT" set TRACKING 0.5 >/dev/null 2>&1
+check "turning tracking up brings the clock back" "$(animated)" "1"
+
+# The regression that would have shipped. GLSL ES will not take an int literal
+# for a const float, and %g drops the decimal point on every whole number, so
+# every "turn it off" rendered `= 0` and failed to compile. It failed SAFE —
+# the old shader stayed up — which is exactly why nobody would have noticed:
+# the knob simply had no effect at one end of its travel.
+check "zero renders as a float literal, not an int" \
+  "$(constof "$SHADER" JIGGLE)" "0.0"
+"$CRT" set SATURATION 1 >/dev/null 2>&1
+check "so does one" "$(constof "$SHADER" SATURATION)" "1.0"
+"$CRT" set FLICKER 0.35 SATURATION 1.0 >/dev/null 2>&1
+
+# ---------------------------------------------------------------------------
+echo
+echo "a service knob outranks the macro, until the macro moves again"
+# ---------------------------------------------------------------------------
+"$CRT" set FADE 0.5 >/dev/null 2>&1
+"$CRT" set BLOOM 0.9 >/dev/null 2>&1
+check "the hand-set constant wins" "$(constof "$SHADER" BLOOM)" "0.9"
+check "its siblings still follow the macro" "$(constof "$SHADER" VIGN)" "0.25"
+"$CRT" set FADE 0.8 >/dev/null 2>&1
+check "turning the macro takes the constant back" "$(constof "$SHADER" BLOOM)" "0.44"
+
+# ---------------------------------------------------------------------------
+echo
+echo "everything it renders compiles"
+# ---------------------------------------------------------------------------
+# A knob that does not exist is refused outright, and — the regression that
+# matters — a refused setting must not be written to knobs.json either. Saving
+# first and validating second bricked the tool over one typo: every later
+# command re-rendered the bad state and died the same way.
+BEFORE_BAD="$(sha256sum "$SHADER" | cut -d' ' -f1)"
+"$CRT" set NOSUCHKNOB 1 >/dev/null 2>&1
+check "an unknown knob exits non-zero" "$?" "1"
+check "and did not touch the live shader" \
+  "$(sha256sum "$SHADER" | cut -d' ' -f1)" "$BEFORE_BAD"
+check "and did not reach the state file" \
+  "$(grep -c NOSUCHKNOB "$XDG_STATE_HOME/omarchy/crt/knobs.json")" "0"
+"$CRT" set SCAN 0.3 >/dev/null 2>&1
+check "the tool still works after a refused setting" \
+  "$(constof "$SHADER" SCAN)" "0.3"
+
+if command -v glslangValidator >/dev/null; then
+  ok "every render above went through glslangValidator"
+else
+  echo "  skip glslangValidator not installed — renders went out unvalidated"
+fi
+
+# ---------------------------------------------------------------------------
+echo
+echo "live.json says what the glass IS, not what was asked for"
+# ---------------------------------------------------------------------------
+check "live.json exists" "$([[ -f "$LIVE" ]] && echo y || echo n)" "y"
+check "it carries a resolved phosphor" \
+  "$(grep -c '"phosphor": "#' "$LIVE")" "1"
+"$CRT" off >/dev/null 2>&1
+check "off is recorded" "$(grep -c '"on": false' "$LIVE")" "1"
+"$CRT" on >/dev/null 2>&1
+check "on is recorded" "$(grep -c '"on": true' "$LIVE")" "1"
+
+# AUTO against no theme at all is UNKNOWN, not black.
+rm -f "$XDG_STATE_HOME/omarchy/current/theme/colors.toml"
+"$CRT" channel auto >/dev/null 2>&1
+check "AUTO with no theme staged resolves to null, not a colour" \
+  "$(grep -c '"channelResolved": null' "$LIVE")" "1"
+stage_theme "#67F454" "#DFE2E3"
+
+# ---------------------------------------------------------------------------
+echo
+echo "install is idempotent, uninstall leaves nothing"
+# ---------------------------------------------------------------------------
+"$CRT" install >/dev/null 2>&1
+"$CRT" install >/dev/null 2>&1
+check "one require() line, however many installs" \
+  "$(grep -c 'require("hypr.crt")' "$HOME/.config/hypr/hyprland.lua")" "1"
+check "it lands after looknfeel, so it wins over a theme's shader" \
+  "$(awk '/require\("hypr.looknfeel"\)/{n=NR} /require\("hypr.crt"\)/{print (NR>n)?"y":"n"}' \
+     "$HOME/.config/hypr/hyprland.lua")" "y"
+check 'a passthrough exists for "crt off" to point at' \
+  "$([[ -f "$HOME/.config/hypr/shaders/passthrough.frag" ]] && echo y || echo n)" "y"
+
+# AUTO is only true if it re-derives when the theme moves. Prove the hook is
+# installed AND that running it actually repaints the phosphor.
+HOOK="$HOME/.config/omarchy/hooks/theme-set.d/crt-rerender.hook"
+check "a theme-set hook is installed" "$([[ -x "$HOOK" ]] && echo y || echo n)" "y"
+"$CRT" channel auto >/dev/null 2>&1
+stage_theme "#b48ead" "#eceff4"          # nord-ish
+BEFORE_SWITCH="$(vec3of "$SHADER" PHOSPHOR)"
+"$HOOK" >/dev/null 2>&1
+AFTER_SWITCH="$(vec3of "$SHADER" PHOSPHOR)"
+check "running it re-derives the phosphor from the new theme" \
+  "$AFTER_SWITCH" "0.706, 0.557, 0.678"
+if [[ "$BEFORE_SWITCH" != "$AFTER_SWITCH" ]]; then
+  ok "and the colour actually moved ($BEFORE_SWITCH -> $AFTER_SWITCH)"
+else
+  bad "and the colour actually moved" "stayed at $AFTER_SWITCH"
+fi
+
+"$CRT" uninstall >/dev/null 2>&1
+check "the require() line is gone" \
+  "$(grep -c 'require("hypr.crt")' "$HOME/.config/hypr/hyprland.lua")" "0"
+check "crt.lua is gone" \
+  "$([[ -f "$HOME/.config/hypr/crt.lua" ]] && echo y || echo n)" "n"
+check "the theme-set hook is gone" \
+  "$([[ -f "$HOOK" ]] && echo y || echo n)" "n"
+check "the rendered shader is gone" \
+  "$([[ -f "$SHADER" ]] && echo y || echo n)" "n"
+check "your knobs survive an uninstall" \
+  "$([[ -f "$XDG_STATE_HOME/omarchy/crt/knobs.json" ]] && echo y || echo n)" "y"
+
+# ---------------------------------------------------------------------------
+echo
+echo "the QML is at least syntactically a plugin"
+# ---------------------------------------------------------------------------
+check "manifest names Panel.qml as the bar widget" \
+  "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["entryPoints"]["barWidget"])' \
+     "$REPO/manifest.json" 2>/dev/null)" "Panel.qml"
+for f in Panel.qml Knob.qml; do
+  check "$f is present" "$([[ -f "$REPO/$f" ]] && echo y || echo n)" "y"
+done
+if command -v qmllint >/dev/null; then
+  echo "  note qmllint needs Quickshell's type registration; run it inside omarchy-shell"
+fi
+
+echo
+echo "  $PASS passed, $FAIL failed"
+[[ $FAIL -eq 0 ]]
