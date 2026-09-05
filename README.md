@@ -3,8 +3,6 @@
 Curved glass, scanlines and a phosphor glow over the whole Omarchy desktop —
 on **any** theme, with four knobs on the bar.
 
-![the front panel](docs/tray.png)
-
 A CRT filter is a **lens**, and a lens is not a palette. This one used to ship
 inside the `terminal-delight` theme, which meant you could own a curved monitor
 only if you agreed to wear green: catppuccin, gruvbox, tokyo-night, nord and
