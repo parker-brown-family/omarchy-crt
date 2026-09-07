@@ -12,7 +12,7 @@
   },
   "barWidget": {
     "displayName": "Terminal CRT",
-    "description": "The front panel of the set: four knobs — BARREL, FADE, TRACKING, CHANNEL — turning the desktop's CRT glass, with the rest of the tube behind a service flap.",
+    "description": "The front panel of the set: four knobs — BARREL, FADE, TRACKING, SCANLINE — turning the desktop's CRT glass, with the rest of the tube behind a service flap.",
     "category": "Appearance",
     "allowMultiple": false,
     "defaults": {
