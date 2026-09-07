@@ -952,6 +952,7 @@ def tubes_watch():
     dirty = False
     first_pending = None
     deadline = None
+    banner_pending = False
     try:
         while True:
             now = _time.monotonic()
@@ -987,6 +988,17 @@ def tubes_watch():
                         last = None
                         dirty = True
                         reset_preconditions()   # reload dropped them at runtime
+                        # The reload also recompiled crt-glass.frag itself
+                        # (crt.lua re-asserts the path at config time) under
+                        # the config-default damage tier — with the clock on,
+                        # that compile raises the sticky red banner EVERY
+                        # reload, and the tier the next build restates only
+                        # protects the compile after it. Nothing else takes
+                        # that banner down: apply()'s press is full-path only,
+                        # and hypr-error-watch polls too slowly to ever see
+                        # the tier wrong. Queue a press for after the burst
+                        # build, once the compile that would re-raise is done.
+                        banner_pending = True
                     if name in WATCH_EVENTS:
                         if name == "openwindow":
                             open_pending.add(norm_addr(data.split(",", 1)[0]))
@@ -1005,6 +1017,25 @@ def tubes_watch():
                 open_pending, close_pending = set(), set()
                 dirty, first_pending, deadline = False, None, None
                 build(o, c, "burst")
+                if banner_pending:
+                    banner_pending = False
+                    # Close the banner the reload raised — but only when the
+                    # rendered glass declares the clock, because only then was
+                    # the reload's compile ours to blame; otherwise the bar
+                    # belongs to hypr-error-watch's probes. Checked on the
+                    # canonical SHADER file, the exact path crt.lua handed the
+                    # reload. Pressed even when build() short-circuited (same
+                    # key, or no td-tubes snapshot): the banner is up either
+                    # way. If that short-circuit also skipped restating the
+                    # tier, the wrong tier persists visibly to hypr-error-watch,
+                    # whose clock probe toasts and repairs it — this press only
+                    # ever closes the banner, never hides that condition.
+                    try:
+                        if re.search(r"^#define ANIMATED\s+1\b",
+                                     SHADER.read_text(), re.M):
+                            hyprctl("seterror", "disable")
+                    except OSError:
+                        pass
             elif fx:
                 latest = max(e["t0"] for e in fx.values())
                 if now >= latest + fx_dur + FX_PAD - 0.002:
