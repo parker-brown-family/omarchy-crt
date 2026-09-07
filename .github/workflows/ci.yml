@@ -21,5 +21,7 @@ jobs:
       - name: run the tests
         run: ./test/run
 
+      # bin/sync-tubes-geometry is Python, not shell, and shellcheck refuses
+      # it outright (SC1071) rather than skipping it.
       - name: shellcheck the scripts
-        run: shellcheck -S warning bin/shoot bin/sync-tubes-geometry test/run
+        run: shellcheck -S warning bin/shoot test/run
