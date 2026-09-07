@@ -37,7 +37,7 @@ out vec4 fragColor;
 // ---- MONITOR CONFIG ----------------------------------------------------
 // One knob per line, 1:1 with a terminal-delight dial (named in the comment).
 // These are DEFAULTS. `crt` renders them through knobs.json into the live
-// shader; the four front-panel dials (BARREL, FADE, TRACKING, CHANNEL) each
+// shader; the four front-panel dials (BARREL, FADE, TRACKING, SCANLINE) each
 // drive a group of them, and every knob is also reachable one at a time.
 #define ANIMATED 0              // 1 = the tracking band / flicker / jiggle actually move.
                                 // Costs what Hyprland's warning says it costs: a time
