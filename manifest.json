@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "brownfamilysports.crt",
-  "name": "Delight-O-Matic",
+  "name": "Terminal CRT",
   "version": "0.1.0",
   "author": "Parker Brown",
   "license": "MIT",
@@ -11,7 +11,7 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Delight-O-Matic",
+    "displayName": "Terminal CRT",
     "description": "The front panel of the set: four knobs — BARREL, FADE, TRACKING, CHANNEL — turning the desktop's CRT glass, with the rest of the tube behind a service flap.",
     "category": "Appearance",
     "allowMultiple": false,

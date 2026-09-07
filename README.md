@@ -1,4 +1,8 @@
-# Delight-O-Matic
+# Terminal CRT
+
+**Delight-O-Matic** is the name on the front panel; the plugin is Terminal CRT,
+sibling of [Terminal Paint](https://github.com/parker-brown-family/omarchy-td-palette).
+Paint gives a terminal its theme; this gives the desktop its glass.
 
 Curved glass, scanlines and a phosphor glow over the whole Omarchy desktop —
 on **any** theme, with four knobs on the bar.
@@ -31,7 +35,7 @@ phosphor tint is for.
 omarchy plugin add https://github.com/parker-brown-family/omarchy-crt
 ```
 
-Add **Delight-O-Matic** to your bar, then click the monitor icon. It wires
+Add **Terminal CRT** to your bar, then click the monitor icon. It wires
 itself into Hyprland on first open — one file (`~/.config/hypr/crt.lua`) and one
 `require()` line — or run `crt/crt install` yourself if you would rather watch.
 

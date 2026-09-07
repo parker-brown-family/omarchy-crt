@@ -10,7 +10,8 @@ import qs.Ui
 // Same blind spot the first-party panels hit; every other check still runs.
 // qmllint disable uncreatable-type missing-property unqualified
 
-// Delight-O-Matic — the front panel of the desktop's cathode ray tube.
+// Terminal CRT — the desktop's cathode ray tube. Delight-O-Matic is the
+// name stamped on the front panel, and the panel is what this file draws.
 //
 // One bar icon and one tray. The icon is the set; the tray is the front of it,
 // with the four knobs a real one had. BARREL bends the glass, FADE is the

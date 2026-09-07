@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The suite runs against a sandbox HOME with a stubbed hyprctl, so it
+      # needs no compositor. glslangValidator and qmllint are used when they
+      # are present and skipped loudly when they are not; jq and python3 are
+      # the only hard requirements.
+      - name: deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq glslang-tools shellcheck
+
+      - name: run the tests
+        run: ./test/run
+
+      - name: shellcheck the scripts
+        run: shellcheck -S warning bin/shoot bin/sync-tubes-geometry test/run
