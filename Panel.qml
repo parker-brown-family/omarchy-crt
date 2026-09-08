@@ -97,10 +97,6 @@ Panel {
     { key: "SPECULAR", label: "ROOM LIGHT" },
     { key: "JIGGLE",   label: "JIGGLE" }
   ]
-  // Screen ignition is a TOGGLE, not a dial — a switch beside the glass on/off,
-  // because a tube firing as its window opens is on or it is not. `crt` renders
-  // its brightness from that toggle; there is no half-ignition worth a knob.
-  readonly property bool ignitionOn: !!(live && live.ignition)
 
   function panelValue(key, fallback) {
     var v = panelKnobs[key]
@@ -141,10 +137,6 @@ Panel {
 
   function toggleGlass() {
     crt(glassOn ? "off" : "on")
-  }
-
-  function toggleIgnition() {
-    crt(ignitionOn ? "ignition off" : "ignition on")
   }
 
   // ------------------------------------------------------------ keyboard nav
@@ -411,44 +403,6 @@ Panel {
               anchors.fill: parent
               cursorShape: Qt.PointingHandCursor
               onClicked: root.toggleGlass()
-            }
-          }
-
-          // Screen ignition — the same switch shape as the glass, right below
-          // it, because it is the same kind of thing: a mode the whole desktop
-          // is in or is not. A tube flashes as its window opens and closes.
-          Rectangle {
-            width: parent.width
-            height: Style.space(40)
-            radius: Style.space(6)
-            visible: root.installed && root.glassOn
-            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
-
-            Text {
-              anchors.left: parent.left
-              anchors.leftMargin: Style.space(12)
-              anchors.verticalCenter: parent.verticalCenter
-              text: root.ignitionOn ? "SCREEN IGNITION ON" : "SCREEN IGNITION OFF"
-              color: root.ignitionOn ? root.phosphor : root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              font.letterSpacing: 1.2
-            }
-
-            Text {
-              anchors.right: parent.right
-              anchors.rightMargin: Style.space(12)
-              anchors.verticalCenter: parent.verticalCenter
-              text: root.ignitionOn ? "click to stop" : "click to fire"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-
-            MouseArea {
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: root.toggleIgnition()
             }
           }
 

@@ -471,7 +471,7 @@ for arr in TUBE_PASS TUBE_QUIET; do
     "$(grep -c "int   $arr\[TUBE_COUNT\]" "$SHADER")" "1"
 done
 check "live.json reports the tube count" \
-  "$(grep -c '\"tubes\": 2' "$LIVE")" "1"
+  "$(grep -c '"tubes": 2' "$LIVE")" "1"
 
 : >"$TUBEFILE"
 "$CRT" render >/dev/null 2>&1
@@ -547,133 +547,6 @@ check "and there is an override for someone who has read the reason" \
   "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$SHADER")" "#define TUBE_COUNT 2"
 rm -f "$TUBEFILE"
 "$CRT" render >/dev/null 2>&1
-
-echo
-echo "the ignition arc ships at zero, and its constants match terminal-delight"
-# ---------------------------------------------------------------------------
-# Same shipped-at-zero discipline as the tubes: git carries FX_COUNT 0 and
-# IGNITION 0.00, so a clean install renders exactly the pixels it did before the
-# effect existed. And the arc's four constants are terminal-delight's own, so a
-# parity check pins them against crt.rs rather than trusting they were copied.
-# ---------------------------------------------------------------------------
-check "the template ships FX_COUNT 0" \
-  "$(grep -c '^#define FX_COUNT 0' "$TEMPLATE")" "1"
-check "the template ships IGNITION at 0.00" "$(constof "$TEMPLATE" IGNITION)" "0.00"
-
-# A FRESH INSTALL SHIPS IGNITION OFF. Not just the template constant — the whole
-# path: no knobs.json at all, the way a clean `omarchy plugin add` arrives. The
-# toggle must default off and render the effect inert, or a first launch would
-# animate every window uninvited. This is the guarantee a shipping default has
-# to keep, so it is asserted end to end, not assumed from the const above.
-rm -rf "$XDG_STATE_HOME/omarchy/crt"
-stage_theme "#67F454" "#DFE2E3"
-"$CRT" render >/dev/null 2>&1
-check "a pristine install (no knobs.json) has ignition OFF in live.json" \
-  "$(grep -c '"ignition": false' "$LIVE")" "1"
-check "and renders the IGNITION const inert at 0.00" "$(constof "$SHADER" IGNITION)" "0.0"
-check "and carries no fx block" \
-  "$(grep -oE '^#define FX_COUNT [0-9]+' "$SHADER")" "#define FX_COUNT 0"
-check "crt ignition (no arg) reports off on a pristine install" \
-  "$("$CRT" ignition 2>&1)" "screen ignition off"
-
-CRTRS="$REPO/../terminal-delight/app/src/crt.rs"
-if [[ -f "$CRTRS" ]]; then
-  rs_ms="$(awk -F'=' '/IGNITION_MS: u64/ {gsub(/[^0-9]/,"",$2); print $2; exit}' "$CRTRS")"
-  rs_bloom="$(awk '/const BLOOM_END/ {gsub(/[;=]/,""); print $(NF); exit}' "$CRTRS")"
-  rs_coll="$(awk '/const COLLAPSE_END/ {gsub(/[;=]/,""); print $(NF); exit}' "$CRTRS")"
-  rs_arm="$(awk '/const ARM/ {gsub(/[;=]/,""); print $(NF); exit}' "$CRTRS")"
-  fs_want="$(awk -v ms="$rs_ms" 'BEGIN{printf "%.2f", ms/1000}')"
-  check "FX_S is IGNITION_MS/1000 ($fs_want)" "$(constof "$TEMPLATE" FX_S)" "$fs_want"
-  check "FX_BLOOM_END matches crt.rs BLOOM_END" "$(constof "$TEMPLATE" FX_BLOOM_END)" "$rs_bloom"
-  check "FX_COLLAPSE_END matches crt.rs COLLAPSE_END" "$(constof "$TEMPLATE" FX_COLLAPSE_END)" "$rs_coll"
-  check "FX_ARM matches crt.rs ARM" "$(constof "$TEMPLATE" FX_ARM)" "$rs_arm"
-else
-  echo "  skip terminal-delight is not checked out beside this repo — arc parity unchecked"
-fi
-
-echo
-echo "the fx block is spliced from state, watcher-gated, and forces the clock while it lives"
-# ---------------------------------------------------------------------------
-# The arc is 0.3 s of runtime state, so — exactly like the tubes — it lives
-# outside the template, is only trusted while a watcher is alive to keep it
-# true, and forces ANIMATED on for its lifetime without latching the stored
-# flag. A CLI render at rest sees FX_COUNT 0 and changes nothing.
-# ---------------------------------------------------------------------------
-rm -rf "$XDG_STATE_HOME/omarchy/crt"
-stage_theme "#67F454" "#DFE2E3"
-"$CRT" render >/dev/null 2>&1
-check "with no fx file the template's own zero stands" \
-  "$(grep -oE '^#define FX_COUNT [0-9]+' "$SHADER")" "#define FX_COUNT 0"
-
-FXFILE="$XDG_STATE_HOME/omarchy/crt/fx.glsl"
-cat >"$FXFILE" <<'FX'
-#define FX_COUNT 1
-#if FX_COUNT > 0
-const vec4  FX_RECT[FX_COUNT]  = vec4[FX_COUNT](vec4(0.0, 0.0, 960.0, 1080.0));
-const int   FX_MON[FX_COUNT]   = int[FX_COUNT](0);
-const float FX_CURV[FX_COUNT]  = float[FX_COUNT](1.0);
-const float FX_START[FX_COUNT] = float[FX_COUNT](-0.03);
-const int   FX_KIND[FX_COUNT]  = int[FX_COUNT](0);
-const vec3  FX_TINT[FX_COUNT]  = vec3[FX_COUNT](vec3(0.2, 0.8, 0.4));
-#endif
-FX
-
-rm -f "$XDG_STATE_HOME/omarchy/crt/watcher.pid"
-"$CRT" render >/dev/null 2>&1
-check "an fx block with no watcher alive is refused, like a tube block" \
-  "$(grep -oE '^#define FX_COUNT [0-9]+' "$SHADER")" "#define FX_COUNT 0"
-
-echo $$ >"$XDG_STATE_HOME/omarchy/crt/watcher.pid"
-"$CRT" set TRACKING 0 FLICKER 0 JIGGLE 0 >/dev/null 2>&1   # a STILL glass: clock off but for fx
-# `on` runs a full apply (render + preconditions), the way the watch does — a
-# bare `render` writes the shader but never touches the damage tier.
-"$CRT" on >/dev/null 2>&1
-check "a live watcher lets the fx block through" \
-  "$(grep -oE '^#define FX_COUNT [0-9]+' "$SHADER")" "#define FX_COUNT 1"
-check "an in-flight arc forces the clock on, though no motion knob is set" \
-  "$(animated)" "1"
-check "and takes damage tier 0 while it needs it" "$(cat "$DAMAGE_STATE")" "0"
-check "live.json reports an arc in flight" "$(grep -c '"fx": 1' "$LIVE")" "1"
-
-: >"$FXFILE"
-"$CRT" on >/dev/null 2>&1
-check "an empty fx file is ignored, and the clock is handed back" "$(animated)" "0"
-check "with damage tracking back to the still-glass tier" "$(cat "$DAMAGE_STATE")" "2"
-
-echo
-echo "screen ignition is a toggle, alongside the glass, that never latches the steady clock"
-# ---------------------------------------------------------------------------
-# A first-class on/off switch like `crt on/off` for the glass — not a level.
-# Off renders IGNITION at 0 (byte-identical); on renders it full. Turning it on
-# must not start the steady clock (only an in-flight arc does), and doctor must
-# flag a toggle-on with no watcher to fire it.
-# ---------------------------------------------------------------------------
-rm -f "$FXFILE" "$XDG_STATE_HOME/omarchy/crt/watcher.pid"
-"$CRT" set TRACKING 0 FLICKER 0 JIGGLE 0 >/dev/null 2>&1
-check "ships off — IGNITION renders 0.00 with the toggle off" \
-  "$(constof "$SHADER" IGNITION)" "0.0"
-"$CRT" ignition on >/dev/null 2>&1
-check "crt ignition on stores the toggle" \
-  "$(grep -c '"ignition": true' "$XDG_STATE_HOME/omarchy/crt/knobs.json")" "1"
-check "and the IGNITION const renders full" "$(constof "$SHADER" IGNITION)" "1.0"
-check "but turning it on does NOT start the clock (only an arc does)" \
-  "$(animated)" "0"
-check "live.json shows the toggle for the panel" "$(grep -c '"ignition": true' "$LIVE")" "1"
-"$CRT" doctor >/dev/null 2>&1
-check "doctor FIGHTs ignition-on with no watcher to fire it" "$?" "1"
-check "and names the missing watcher" \
-  "$(grep -c 'no tube watcher is running' "$XDG_STATE_HOME/omarchy/crt/doctor.json")" "1"
-"$CRT" ignition off >/dev/null 2>&1
-check "crt ignition off renders the const back to 0" "$(constof "$SHADER" IGNITION)" "0.0"
-
-echo
-echo "the fx unit checks (offset re-baking, signature, eligibility)"
-# ---------------------------------------------------------------------------
-if python3 "$REPO/test/fx-unit" >/dev/null 2>&1; then
-  ok "test/fx-unit is all green"
-else
-  bad "test/fx-unit failed" "run it directly to see which case"
-fi
 
 echo
 echo "the QML is at least syntactically a plugin"

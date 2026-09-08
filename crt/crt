@@ -56,10 +56,6 @@ HOME = Path.home()
 STATE = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "omarchy/crt"
 KNOBS = STATE / "knobs.json"
 TUBES = STATE / "tubes.glsl"
-# The ignition/shutdown effects, one block of GLSL constants written by the
-# watch for the ~0.3 s an arc is in flight and left at FX_COUNT 0 the rest of
-# the time. Runtime-only, like TUBES: nothing here is ever committed.
-FX = STATE / "fx.glsl"
 PLUGIN = Path(__file__).resolve().parent
 TEMPLATE = PLUGIN / "crt-glass.frag"
 # The rendered shader lives in the plugin's OWN state directory, not in
@@ -162,10 +158,6 @@ def load():
         # nothing changing on it gets no frames, so the band strands
         # mid-screen until something else repaints it.
         "quietUnfocused": True,
-        # Screen ignition: a tube flashes as its window opens and closes. A
-        # toggle in its own right, alongside `on` (the glass) — off by default,
-        # because it is motion the user opts into, not part of the still glass.
-        "ignition": False,
     }
     if KNOBS.exists():
         try:
@@ -185,8 +177,14 @@ def load():
             st["passthrough"] = [x for x in got["passthrough"] if isinstance(x, str)]
         if isinstance(got.get("quietUnfocused"), bool):
             st["quietUnfocused"] = got["quietUnfocused"]
-        if isinstance(got.get("ignition"), bool):
-            st["ignition"] = got["ignition"]
+        # The screen-ignition flash (a tube firing as its window opened and
+        # closed) was removed 2026-09-08. Its two service knobs are retired by
+        # name, because a state file that still carries them would fail every
+        # later render on "no such knob" — the self-bricking commit() exists to
+        # prevent. The old "ignition" toggle key is simply no longer read, and
+        # the next save drops it.
+        for retired in ("IGNITION", "FX_S"):
+            st["service"].pop(retired, None)
     return st
 
 
@@ -309,13 +307,6 @@ def render(st, path=None, validate=True):
     animated = 1 if st.get("animated") else 0
     text = re.sub(r"^(#define ANIMATED\s+)[01]", rf"\g<1>{animated}", text, count=1, flags=re.M)
 
-    # IGNITION is driven by the toggle, not the knob loop above: full depth when
-    # screen ignition is on, flat 0 when off. Off renders the const at 0.00 so a
-    # glass with ignition off is byte-identical to one built without the effect.
-    ign = ignition_depth(st) if ignition_on(st) else 0.0
-    text = re.sub(r"^(const float IGNITION   = )-?[0-9.]+;",
-                  rf"\g<1>{glsl(ign)};", text, count=1, flags=re.M)
-
     # The phosphor is the staged theme's, or the template's own when no theme
     # is staged — which is unknown, not black, and so is left alone.
     ch = theme_colours()
@@ -372,30 +363,6 @@ def render(st, path=None, validate=True):
                 lambda m: m.group(1) + block.rstrip("\n") + "\n" + m.group(2),
                 text, count=1, flags=re.S)
 
-    # The ignition fx, spliced the same guarded way as the tubes — and, like
-    # them, only trusted while a watcher is alive to keep them true, since an arc
-    # is a 0.3 s thing no snapshot can own. At rest the watch leaves FX_COUNT 0
-    # here, so a CLI render (a knob turn) splices a no-op. A block that fails to
-    # define its count is ignored rather than allowed to break the #if.
-    fx_active = False
-    if FX.exists() and (watcher_alive() or os.environ.get("CRT_TUBES_ANYWAY")):
-        fxblock = FX.read_text()
-        if not re.search(r"^\s*#define FX_COUNT\s+\d+", fxblock, re.M):
-            print(f"warning: ignoring {FX} — it defines no FX_COUNT", file=sys.stderr)
-        else:
-            fx_active = not re.search(r"#define FX_COUNT\s+0\b", fxblock)
-            text = re.sub(
-                r"(// ---- FX DATA[^\n]*\n).*?(// ---- END FX DATA ----)",
-                lambda m: m.group(1) + fxblock.rstrip("\n") + "\n" + m.group(2),
-                text, count=1, flags=re.S)
-
-    # A flash needs the clock, so an in-flight arc forces ANIMATED on regardless
-    # of the stored flag — but only for as long as the arc lives. IGNITION is not
-    # a MOTION knob, so it never latches the clock here; the fx count does, and
-    # the expiry swap that drops the count takes the clock back out with it.
-    if fx_active:
-        text = re.sub(r"^(#define ANIMATED\s+)[01]", r"\g<1>1", text, count=1, flags=re.M)
-
     out = Path(path) if path else SHADER
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -447,7 +414,6 @@ def publish(st, text):
               for m in re.finditer(r"^const float ([A-Z_0-9]+)\s*=\s*(-?[0-9.]+)", text, re.M)}
     animated = re.search(r"^#define ANIMATED\s+([01])", text, re.M)
     tubes = re.search(r"^#define TUBE_COUNT\s+(\d+)", text, re.M)
-    fx = re.search(r"^#define FX_COUNT\s+(\d+)", text, re.M)
 
     def hexof(group):
         m = re.search(rf"^const vec3  {group} += vec3\(([^)]*)\);", text, re.M)
@@ -458,9 +424,6 @@ def publish(st, text):
 
     doc = {
         "on": st["on"],
-        # The screen-ignition toggle, so the panel can show it beside the glass
-        # switch — its own control, not derived from anything on screen.
-        "ignition": ignition_on(st),
         # null when no theme is staged to take a colour from. Null is not
         # black here: it is "nobody said", and the panel says so.
         "phosphorFrom": "theme" if ch else None,
@@ -472,10 +435,6 @@ def publish(st, text):
         # worth saying out loud rather than leaving the reader to wonder why
         # nothing is curved.
         "tubes": int(tubes.group(1)) if tubes else 0,
-        # Arcs in flight this instant — almost always 0, briefly 1+ while a
-        # window fires up or goes dark. A UI can show the knob is doing
-        # something without polling the shader.
-        "fx": int(fx.group(1)) if fx else 0,
         "panel": {k: st["panel"].get(k, PANEL_DEFAULTS[k]) for k in PANEL_DEFAULTS},
         "consts": consts,
         "shader": str(SHADER),
@@ -548,47 +507,28 @@ def write_passthrough():
 GEOMETRY = PLUGIN / "tubes-geometry"
 
 
-def td_tubes_snapshot(passthrough=(), quiet_unfocused=True):
-    """The current TUBE block AND the capped rows behind it, or (None, None).
-
-    One geometry run yields both. The GLSL block is exactly what td_tubes_block
-    always returned — the rect list with TUBE_PASS/TUBE_QUIET added. The rows are
-    the same capped surfaces as JSON objects, each carrying its window `addr`, so
-    the ignition watch can match a socket2 open/close event to the rect that was
-    there. Sharing one run keeps block and rows in lockstep and pays hyprctl once.
+def td_tubes_block(passthrough=(), quiet_unfocused=True):
+    """The current TUBE block for the live layout, or None.
 
     The geometry emits a `// <class>` comment on every rect line, which is what
     lets the passthrough list be written in terms of window classes rather than
     indices into a list that changes every time a window opens.
     """
     if not GEOMETRY.exists():
-        return None, None
-    # Compute the capped rects ONCE, then print them as JSON and as the baked
-    # block either side of a marker — two views of one measurement.
+        return None
     r = subprocess.run(
-        ["bash", "-c",
-         f'source "{GEOMETRY}"; j="$(cap "$(tubes_json)")"; '
-         f'printf %s "$j"; printf "\\n===CRT-BLOCK===\\n"; emit_block "$j"'],
+        ["bash", "-c", f'source "{GEOMETRY}"; emit_block "$(cap "$(tubes_json)")"'],
         capture_output=True, text=True)
-    if r.returncode != 0 or "===CRT-BLOCK===" not in r.stdout:
-        return None, None
-    json_part, _, block_raw = r.stdout.partition("\n===CRT-BLOCK===\n")
-    if "#define TUBE_COUNT" not in block_raw:
-        return None, None
-    try:
-        rows = json.loads(json_part)
-        if not isinstance(rows, list):
-            rows = []
-    except ValueError:
-        rows = []
+    if r.returncode != 0 or "#define TUBE_COUNT" not in r.stdout:
+        return None
 
     # Strip td-tubes' own markers; render() supplies its own.
-    body = re.sub(r"^// ---- TUBE DATA[^\n]*\n", "", block_raw)
+    body = re.sub(r"^// ---- TUBE DATA[^\n]*\n", "", r.stdout)
     body = re.sub(r"// ---- END TUBE DATA ----\n?$", "", body)
 
     n = int(re.search(r"#define TUBE_COUNT\s+(\d+)", body).group(1))
     if n == 0:
-        return body, rows
+        return body
 
     classes = re.findall(r"^\s*vec4\([^)]*\),?\s*//\s*(.+?)\s*$", body, re.M)
     if len(classes) != n:
@@ -609,19 +549,10 @@ def td_tubes_snapshot(passthrough=(), quiet_unfocused=True):
     else:
         quiet = ", ".join(["0"] * n)
 
-    block = body.replace(
+    return body.replace(
         "#endif",
         f"const int   TUBE_PASS[TUBE_COUNT] = int[TUBE_COUNT](\n    {flags}\n);\n"
         f"const int   TUBE_QUIET[TUBE_COUNT] = int[TUBE_COUNT](\n    {quiet}\n);\n#endif")
-    return block, rows
-
-
-def td_tubes_block(passthrough=(), quiet_unfocused=True):
-    """The current rect block alone, or None — td_tubes_snapshot without rows.
-    Kept for the callers (tubes_once, the geometry-missing checks) that never
-    needed the rows."""
-    block, _ = td_tubes_snapshot(passthrough, quiet_unfocused)
-    return block
 
 
 def focused_monitor():
@@ -662,153 +593,6 @@ def write_tubes(block):
     tmp.replace(TUBES)
 
 
-# ---- ignition/shutdown fx ---------------------------------------------------
-#
-# A window opening or closing fires its tube: the arc in crt-glass.frag's
-# fx_pattern, ported from terminal-delight. The shader draws it; this half
-# decides WHICH rect fires, WHEN, and keeps arcs alive across the shader
-# rebuilds that other events trigger. The whole feature is off unless the
-# IGNITION knob is above zero.
-FX_S_DEFAULT = 0.30  # arc length shipped, matched to crt-glass.frag / crt.rs IGNITION_MS
-FX_PAD  = 0.05   # grace past the arc length before an entry is pruned
-FX_LEAD = 0.03   # start each arc this far in, to eat the compile+swap latency
-FX_MAX  = 8      # most arcs baked at once; a storm keeps the newest
-
-
-def ignition_on(st):
-    """The screen-ignition toggle — a first-class switch like the glass `on`,
-    not a knob. When off, no window fires and the IGNITION const renders 0, so
-    the glass is byte-identical to a build that never had the effect."""
-    return bool(st.get("ignition", False))
-
-
-def ignition_depth(st):
-    """How bright the flash is, 0..1, when ignition is on. An advanced override
-    via `crt set IGNITION`; full by default so the plain toggle just works. NOT
-    a MOTION knob — an in-flight arc lights its own clock, and turning ignition
-    on never latches the steady-state clock."""
-    try:
-        return min(1.0, max(0.0, float(st.get("service", {}).get("IGNITION", 1.0))))
-    except (TypeError, ValueError):
-        return 1.0
-
-
-def fx_duration(st):
-    """How long an arc lasts, in seconds — the FX_S knob, defaulting to TD's
-    0.30 s. The shader plays over its own FX_S const (set from the same knob by
-    render), so this side must read the SAME value or the expiry would prune a
-    longer arc before it finished. Clamped to a sane range so a typo cannot wedge
-    the watch on a multi-second or zero-length arc."""
-    try:
-        v = float(st.get("service", {}).get("FX_S", FX_S_DEFAULT))
-    except (TypeError, ValueError):
-        return FX_S_DEFAULT
-    return min(3.0, max(0.05, v))
-
-
-def norm_addr(a):
-    """A Hyprland window address, comparable across sources. socket2 events name
-    a window as `55d7…`; hyprctl reports `0x55d7…`. Strip the prefix, lowercase,
-    so the two always meet."""
-    a = (a or "").strip().lower()
-    return a[2:] if a.startswith("0x") else a
-
-
-def rows_by_addr(rows):
-    return {norm_addr(r.get("addr")): r for r in rows if r.get("addr")}
-
-
-def fx_eligible(row, st, focused):
-    """Does this surface get a flash? A tube that opts out of the warp
-    (curvature 0) is not pretending to be a CRT — flat layers and, deliberately,
-    terminal-delight, which plays its own per-pane ignition. A passthrough class
-    hands its pixels back before the fx loop could paint them. And on a quiet
-    (unfocused) monitor the clock is frozen, so an arc there would strand
-    mid-flight — the same reason TUBE_QUIET exists."""
-    try:
-        if float(row.get("curv", 0)) <= 0.0:
-            return False
-    except (TypeError, ValueError):
-        return False
-    if row.get("class") in st.get("passthrough", []):
-        return False
-    if st.get("quietUnfocused", True) and focused is not None:
-        if row.get("mon") != focused:
-            return False
-    return True
-
-
-def _fx_entry(kind, row, now):
-    """An fx table entry from a geometry row. The rect is the window's own, in
-    the same framebuffer space the tube used, so the flash lands exactly where
-    the tube was — captured now, because a closing window's rect is gone from
-    the next snapshot."""
-    return {
-        "kind": kind,
-        "mon": int(row.get("mon", 0)),
-        "rect": (float(row["x"]), float(row["y"]), float(row["w"]), float(row["h"])),
-        "curv": float(row.get("curv", 1) or 1),
-        "t0": now,
-    }
-
-
-def fx_sig(fx):
-    """What has to change before an fx bake is worth a recompile. Everything
-    that defines an arc EXCEPT its baked FX_START offset — the offset is
-    recomputed on every bake by construction, so hashing it would make every
-    bake differ from the last and the watch would rebuild without end. The live
-    offsets stay correct while nothing rebuilds because the live clock keeps
-    running; a rebuild only has to happen when an arc appears, ends, or its rect
-    moves, none of which this signature can miss."""
-    return tuple(sorted(
-        (a, e["kind"], e["mon"], tuple(e["rect"]), round(e["t0"], 3))
-        for a, e in fx.items()))
-
-
-def fx_tint():
-    """The flash colour: the staged theme's phosphor, white when no theme is
-    staged (never the template's baked green over a foreign theme). The seam a
-    later per-terminal tint from Terminal Paint plugs into, by address."""
-    ch = theme_colours()
-    return ch[0] if ch else (1.0, 1.0, 1.0)
-
-
-def write_fx(fx, now):
-    """The FX DATA block for the arcs in flight. FX_START is negative seconds:
-    -(elapsed + lead), so an arc re-baked mid-flight keeps its place instead of
-    restarting when the shader's clock is reset by the swap, and a fresh arc
-    starts a hair early to cover the compile+swap latency."""
-    STATE.mkdir(parents=True, exist_ok=True)
-    items = sorted(fx.items(), key=lambda kv: kv[1]["t0"])
-    n = len(items)
-    # Markerless, like tubes.glsl: render() owns the FX DATA markers and splices
-    # this body between them.
-    lines = [f"#define FX_COUNT {n}"]
-    if n:
-        tint = fx_tint()
-        rects = ", ".join(
-            f"vec4({glsl(e['rect'][0])}, {glsl(e['rect'][1])}, "
-            f"{glsl(e['rect'][2])}, {glsl(e['rect'][3])})" for _, e in items)
-        mons  = ", ".join(str(int(e["mon"])) for _, e in items)
-        curvs = ", ".join(glsl(e["curv"]) for _, e in items)
-        starts = ", ".join(glsl(min(0.0, -((now - e["t0"]) + FX_LEAD))) for _, e in items)
-        kinds = ", ".join(str(int(e["kind"])) for _, e in items)
-        tints = ", ".join(
-            f"vec3({glsl(tint[0])}, {glsl(tint[1])}, {glsl(tint[2])})" for _ in items)
-        lines += [
-            "#if FX_COUNT > 0",
-            f"const vec4  FX_RECT[FX_COUNT]  = vec4[FX_COUNT]({rects});",
-            f"const int   FX_MON[FX_COUNT]   = int[FX_COUNT]({mons});",
-            f"const float FX_CURV[FX_COUNT]  = float[FX_COUNT]({curvs});",
-            f"const float FX_START[FX_COUNT] = float[FX_COUNT]({starts});",
-            f"const int   FX_KIND[FX_COUNT]  = int[FX_COUNT]({kinds});",
-            f"const vec3  FX_TINT[FX_COUNT]  = vec3[FX_COUNT]({tints});",
-            "#endif"]
-    tmp = STATE / "fx.glsl.new"
-    tmp.write_text("\n".join(lines) + "\n")
-    tmp.replace(FX)
-
-
 def tubes_once():
     st = load()
     block = td_tubes_block(st.get("passthrough", []), st.get("quietUnfocused", True))
@@ -845,11 +629,8 @@ def tubes_watch():
 
     def flatten(*_):
         # Leaving the last rects behind on the way out is the snapshot bug with
-        # extra steps, so the glass goes flat when the watch stops — and any arc
-        # in flight is cleared with it, so no half-finished flash can outlive the
-        # process that promised to complete it.
+        # extra steps, so the glass goes flat when the watch stops.
         write_tubes("#define TUBE_COUNT 0\n")
-        write_fx({}, _time.monotonic())
         try:
             apply(load())
         except SystemExit:
@@ -862,81 +643,34 @@ def tubes_watch():
     signal.signal(signal.SIGINT, flatten)
 
     last = None
-    last_fx = None
-    fx = {}            # addr -> {kind, mon, rect, curv, t0}
-    addr_rows = {}     # addr -> row, from the PREVIOUS snapshot: the only place
-                       # a window that just closed still has a rectangle.
-    fx_dur = FX_S_DEFAULT   # arc length, re-read from the knob on every refresh so
-                            # the loop's expiry timeout tracks `crt set FX_S`.
 
-    def build(open_addrs, close_addrs, why, validate=False):
-        """One coalesced rebuild: snapshot once, bake the arcs collected across a
-        burst, and swap once. Called after a burst settles, not per event — a
-        single window open fires openwindow plus a movewindow for every sibling
-        the tiler shifts, and rebuilding (snapshot + compile + swap) on each was
-        the jank. glslangValidator is skipped here (validate=False): the blocks
-        are machine-generated with a test-covered structure, and it costs ~110 ms
-        an event. Startup validates once."""
-        nonlocal last, last_fx, addr_rows, fx, fx_dur
-        t_enter = _time.monotonic()
+    def build(why, validate=False):
+        """One coalesced rebuild: snapshot once, swap once. Called after a burst
+        settles, not per event — a single window open fires openwindow plus a
+        movewindow for every sibling the tiler shifts, and rebuilding
+        (snapshot + compile + swap) on each was the jank. glslangValidator is
+        skipped here (validate=False): the block is machine-generated with a
+        test-covered structure, and it costs ~110 ms an event. Startup
+        validates once."""
+        nonlocal last
         stw = load()
-        block, rows = td_tubes_snapshot(stw.get("passthrough", []),
-                                        stw.get("quietUnfocused", True))
+        block = td_tubes_block(stw.get("passthrough", []),
+                               stw.get("quietUnfocused", True))
         if block is None:
             return
-        now = _time.monotonic()
-        fx_dur = fx_duration(stw)
-        new_rows = rows_by_addr(rows)
-
-        # Ignition is a toggle now, not a level. Live only when it is on AND the
-        # geometry carries addresses to match an event to a rect.
-        have_addr = any(r.get("addr") for r in rows)
-        fx_on = ignition_on(stw) and have_addr
-        if ignition_on(stw) and not have_addr and os.environ.get("CRT_WATCH_DEBUG"):
-            print("crt: ignition on but geometry has no addr field — "
-                  "run bin/sync-tubes-geometry; fx disabled", flush=True)
-
-        if fx_on:
-            focused = focused_monitor()
-            # A closing window resolves against the PRE-burst snapshot, where its
-            # rectangle still exists; an opening one against the fresh snapshot.
-            for a in close_addrs:
-                row = addr_rows.get(a)
-                if row and fx_eligible(row, stw, focused):
-                    fx[a] = _fx_entry(1, row, now)
-            for a in open_addrs:
-                row = new_rows.get(a)
-                if row and fx_eligible(row, stw, focused):
-                    fx[a] = _fx_entry(0, row, now)
-            for a in [a for a, e in fx.items() if now - e["t0"] > fx_dur + FX_PAD]:
-                del fx[a]
-            if len(fx) > FX_MAX:
-                for a, _ in sorted(fx.items(), key=lambda kv: kv[1]["t0"])[:-FX_MAX]:
-                    del fx[a]
-        elif fx:
-            fx = {}
-
-        addr_rows = new_rows
-        key, sigfx = block_key(block), fx_sig(fx)
-        if key == last and sigfx == last_fx:
+        key = block_key(block)
+        if key == last:
             if os.environ.get("CRT_WATCH_DEBUG"):
                 print(f"crt: (no change)  <- {why}", flush=True)
             return
-        last, last_fx = key, sigfx
-        t_snap = _time.monotonic()
+        last = key
         write_tubes(block)
-        write_fx(fx, now)
         apply(load(), validate=validate)
         n = re.search(r"#define TUBE_COUNT\s+(\d+)", block)
-        note = f"  fx={len(fx)}" if (fx or last_fx) else ""
-        print(f"crt: {n.group(1) if n else '?'} tube(s){note}  <- {why}", flush=True)
-        if os.environ.get("CRT_FX_TIME"):
-            print(f"crt: fxtime {why} total={(_time.monotonic() - t_enter) * 1000:.0f} "
-                  f"snap={(t_snap - t_enter) * 1000:.0f} apply={(_time.monotonic() - t_snap) * 1000:.0f}",
-                  flush=True)
+        print(f"crt: {n.group(1) if n else '?'} tube(s)  <- {why}", flush=True)
 
     print(f"crt: watching {sock_path} (ctrl-c to stop)", flush=True)
-    build(set(), set(), "start", validate=True)
+    build("start", validate=True)
 
     s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
     s.connect(str(sock_path))
@@ -948,7 +682,6 @@ def tubes_watch():
     # several times a second rather than deferring forever.
     DEBOUNCE = 0.045
     COALESCE_MAX = 0.20
-    open_pending, close_pending = set(), set()
     dirty = False
     first_pending = None
     deadline = None
@@ -956,19 +689,9 @@ def tubes_watch():
     try:
         while True:
             now = _time.monotonic()
-            waits = []
+            timeout = None
             if dirty and deadline is not None:
-                waits.append(deadline - now)
-            if fx:
-                # Wait for the LAST arc to finish, not the first. Expired arcs
-                # left in the block cost nothing — the shader skips any whose
-                # ft >= 1 — so there is no reason to recompile as each one ends.
-                # One rebuild when they are all done clears the block and drops
-                # the clock; that turns a stack of N arcs from N tail-compiles
-                # into one.
-                latest = max(e["t0"] for e in fx.values())
-                waits.append(latest + fx_dur + FX_PAD - now)
-            timeout = max(0.0, min(waits)) if waits else None
+                timeout = max(0.0, deadline - now)
             ready, _, _ = _select.select([s], [], [], timeout)
             now = _time.monotonic()
 
@@ -979,7 +702,7 @@ def tubes_watch():
                 buf += chunk
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
-                    name, _, data = line.decode("utf-8", "replace").partition(">>")
+                    name = line.decode("utf-8", "replace").partition(">>")[0]
                     # A reload is AMNESIA: Hyprland re-reads its config and drops
                     # everything set at runtime — the shader binding and both
                     # preconditions. Forgetting `last` makes the next build
@@ -1000,10 +723,6 @@ def tubes_watch():
                         # build, once the compile that would re-raise is done.
                         banner_pending = True
                     if name in WATCH_EVENTS:
-                        if name == "openwindow":
-                            open_pending.add(norm_addr(data.split(",", 1)[0]))
-                        elif name == "closewindow":
-                            close_pending.add(norm_addr(data))
                         dirty = True
                         if first_pending is None:
                             first_pending = now
@@ -1013,10 +732,8 @@ def tubes_watch():
             # (COALESCE_MAX): rebuild once with everything collected.
             if dirty and deadline is not None and (
                     now >= deadline or now - first_pending >= COALESCE_MAX):
-                o, c = open_pending, close_pending
-                open_pending, close_pending = set(), set()
                 dirty, first_pending, deadline = False, None, None
-                build(o, c, "burst")
+                build("burst")
                 if banner_pending:
                     banner_pending = False
                     # Close the banner the reload raised — but only when the
@@ -1036,12 +753,6 @@ def tubes_watch():
                             hyprctl("seterror", "disable")
                     except OSError:
                         pass
-            elif fx:
-                latest = max(e["t0"] for e in fx.values())
-                if now >= latest + fx_dur + FX_PAD - 0.002:
-                    # Every arc is done: one rebuild swaps the still glass back
-                    # and drops the clock (build() prunes them all at once).
-                    build(set(), set(), "fx-expiry")
     finally:
         flatten()
 
@@ -1103,22 +814,6 @@ def conflicts():
     if HYPRLAND_LUA.exists() and REQUIRE in HYPRLAND_LUA.read_text():
         out.append(("note", "hypr.crt is wired into hyprland.lua",
                     "`crt install` has been run. `crt uninstall` takes it back out."))
-
-    # The ignition knob is only as alive as the two things it rides on: a watch
-    # to catch window events, and geometry new enough to name windows by address.
-    # A knob turned up over either gap does nothing, silently — the exact failure
-    # a control that cannot act is worse than no control at all.
-    if ignition_on(load()):
-        if not watcher_alive():
-            out.append(("fight", "screen ignition is on but no tube watcher is running",
-                        "The flash rides the watch that follows window events — with\n"
-                        "    no watcher it never fires. Start it:\n"
-                        "    systemctl --user start crt-tubes.service"))
-        if GEOMETRY.exists() and "addr:" not in GEOMETRY.read_text():
-            out.append(("reload", "screen ignition is on but the tube geometry predates window addresses",
-                        "Without an address per rect a closing window cannot be matched\n"
-                        "    to the tube that vanished, so the flash stays dark. Refresh it:\n"
-                        "    bin/sync-tubes-geometry"))
 
     return out
 
@@ -1266,13 +961,13 @@ def preconditions(animated, tube_count, force=False):
     else:
         want_damage = "2"
     want_cursor = "1" if tube_count > 0 else "2"
-    # Skip when nothing changed. These two settings hold across a whole run of
-    # arcs (damage stays 0 while any arc is live, the cursor stays software
-    # while any tube exists), so re-asserting them on every rebuild spent three
-    # hyprctl round trips for nothing — and under tier 0 each of those round
-    # trips is contended against a full-screen redraw, ballooning from ~6 ms to
-    # tens or hundreds. `force` re-asserts anyway, for the config-reload race
-    # (see apply): a reload drops these at runtime and the cache would not know.
+    # Skip when nothing changed. These two settings hold across long runs of
+    # rebuilds (the cursor stays software while any tube exists), so
+    # re-asserting them on every rebuild spent three hyprctl round trips for
+    # nothing — and under tier 0 each of those round trips is contended against
+    # a full-screen redraw, ballooning from ~6 ms to tens or hundreds. `force`
+    # re-asserts anyway, for the config-reload race (see apply): a reload drops
+    # these at runtime and the cache would not know.
     if not force and _PRECOND["damage"] == want_damage and _PRECOND["cursor"] == want_cursor:
         return
     out = hyprctl("keyword", "debug:damage_tracking", want_damage)
@@ -1370,9 +1065,8 @@ def apply(st, validate=True):
         return
     # Re-setting the same path is a no-op, so drop and re-set to force a
     # recompile of the file we just changed. The clock state is read from the
-    # RENDERED shader, not the stored flag, so an in-flight ignition arc (which
-    # forces ANIMATED on for its 0.3 s) is paid for in damage tier while it
-    # lasts and no longer once the expiry swap drops it.
+    # RENDERED shader, not the stored flag, so the damage tier always follows
+    # what was actually compiled.
     txt = out.read_text()
     n = re.search(r"#define TUBE_COUNT\s+(\d+)", txt)
     anim = re.search(r"^#define ANIMATED\s+([01])", txt, re.M)
@@ -1413,15 +1107,13 @@ def apply(st, validate=True):
     # being cut here.
     if validate and clock_on:
         hyprctl("seterror", "disable")
-    # The forensic line names every compile we cause — clock state, tier, tube
-    # and fx count, with a wall clock — so a picture of the banner plus its
-    # timestamp convicts one specific swap. `animated` is the RENDERED clock, so
-    # an arc (which forces it on while the stored flag stays off) reads honestly.
+    # The forensic line names every compile we cause — clock state, tier and
+    # tube count, with a wall clock — so a picture of the banner plus its
+    # timestamp convicts one specific swap. `animated` is the RENDERED clock.
     import datetime as _dt
-    fxn = re.search(r"#define FX_COUNT\s+(\d+)", txt)
     print(f"crt: apply {_dt.datetime.now():%H:%M:%S} "
           f"animated={1 if clock_on else 0} on={int(st['on'])} "
-          f"tubes={n.group(1) if n else 0} fx={fxn.group(1) if fxn else 0}", flush=True)
+          f"tubes={n.group(1) if n else 0}", flush=True)
     if validate:
         errs = (hyprctl("configerrors") or "").strip()
         if errs and "no errors" not in errs:
@@ -1705,26 +1397,8 @@ def main(argv):
         print("glass on" if st["on"] else "glass lifted")
         return
 
-    # Screen ignition: a toggle alongside the glass, on|off. `crt ignition`
-    # alone reports the current state.
-    if cmd == "ignition":
-        verb = rest[0].lower() if rest else ""
-        if verb in ("on", "off"):
-            st["ignition"] = verb == "on"
-            commit(st)
-            if st["ignition"] and not watcher_alive():
-                print("screen ignition on — but no tube watcher is running, so nothing\n"
-                      "  will fire yet. systemctl --user start crt-tubes.service", file=sys.stderr)
-            else:
-                print("screen ignition on" if st["ignition"] else "screen ignition off")
-        elif not verb:
-            print("screen ignition on" if ignition_on(st) else "screen ignition off")
-        else:
-            die("crt ignition on|off")
-        return
-
     die(f"unknown command '{cmd}' — "
-        "crt [list|set|on|off|ignition|doctor|try|untry|install|uninstall|render]")
+        "crt [list|set|on|off|doctor|try|untry|install|uninstall|render]")
 
 
 if __name__ == "__main__":

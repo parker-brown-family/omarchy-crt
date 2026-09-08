@@ -1,5 +1,14 @@
 # HANDOFF — ignition / on-off animation groundwork
 
+> **2026-09-08 — the per-window half of this was built, shipped, and then
+> removed.** Parker ruled the open/close window animation a no-fly, and the
+> whole ignition feature (shader arc, fx state, watch wiring, toggle, probes)
+> came out in the commit that carries this note. Do not rebuild it without a
+> new decision. The measurements below remain valid and worth keeping — the
+> per-apply clock reset, the latched banner, the damage-tier costs — and the
+> GLASS's own on/off transition described here was never built and never
+> vetoed.
+
 For the agent building the power-on animation. Everything below was derived or
 measured in the session that built this plugin (2026-09-04/05); take it rather
 than re-digging.

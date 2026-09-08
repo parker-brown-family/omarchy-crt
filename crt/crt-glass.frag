@@ -76,12 +76,6 @@ const float SATURATION = 1.00;  // 0..2                        (TD grade colour)
 const float GAMMA      = 1.00;  // 0.5..2                      (TD grade gamma)
 const vec3  PHOSPHOR   = vec3(0.133, 0.773, 0.369); // from the staged theme's accent
 const vec3  GLARE_TINT = vec3(0.72, 1.00, 0.78);    // crt_pass.wgsl glare_color
-const float IGNITION   = 0.00;  // window power-on/off flash depth, 0..1 (crt.rs ignition).
-                                // SHIPS AT 0: no flash, and the FX loop below folds to a
-                                // dead branch. `crt set IGNITION 1` turns it on at runtime;
-                                // 1.0 is terminal-delight's own glow curve. NOT a MOTION
-                                // knob — the clock rides the live FX_COUNT, not this dial,
-                                // so a transient flash never latches a permanent redraw.
 // ---- END CONFIG --------------------------------------------------------
 
 // The clock exists only when asked for. Declaring `uniform float time` — even
@@ -238,118 +232,6 @@ float tube_phase(int i) {
 }
 // ---- end tubes -------------------------------------------------------------
 
-// ---- THE IGNITION: a tube firing up or going dark, once, on a window event ----
-// Ported dial for dial from terminal-delight's app/src/crt.rs. A tube does not
-// simply appear: the phosphor floods from the top and bottom edges, the flood
-// collapses to a single scan line, and the line pinches to a four-pointed star
-// that fades as the terminal comes up behind it. A power-DOWN is the same arc
-// entered at the end of the bloom and run forward — screen to line, line to
-// star — so one function serves both, exactly as crt.rs remaps shutdown onto
-// ignition. Everything here is emissive: white light over a dark tube face,
-// needing none of the closing window's own pixels (which are already gone).
-//
-// These are crt.rs's constants verbatim. A parity test greps them against the
-// source so the numbers cannot drift.
-const float FX_S           = 0.30;   // IGNITION_MS — the whole arc, in seconds
-const float FX_BLOOM_END   = 0.40;   // BLOOM_END — flood has met in the middle
-const float FX_COLLAPSE_END = 0.68;  // COLLAPSE_END — lit screen closed to a line
-const float FX_ARM         = 0.012;  // ARM — star arm thickness, fraction of the tube
-
-// ---- FX DATA (managed by `crt tubes watch` — do not hand-edit) ----
-// SHIPS AT ZERO, like the tubes: a clean checkout carries FX_COUNT 0, every
-// branch below compiles out, and the shader renders exactly the pixels it did
-// before this block existed. Only a live watch writes a non-zero block, and
-// only for the ~0.3 s an arc is in flight. test/run pins the zero.
-#define FX_COUNT 0
-#if FX_COUNT > 0
-const vec4  FX_RECT[FX_COUNT]  = vec4[FX_COUNT](vec4(0.0));
-const int   FX_MON[FX_COUNT]   = int[FX_COUNT](0);
-const float FX_CURV[FX_COUNT]  = float[FX_COUNT](0.0);
-const float FX_START[FX_COUNT] = float[FX_COUNT](0.0);  // seconds, <= 0: when the arc began
-const int   FX_KIND[FX_COUNT]  = int[FX_COUNT](0);      // 0 = ignite, 1 = shutdown
-const vec3  FX_TINT[FX_COUNT]  = vec3[FX_COUNT](vec3(1.0));  // flash colour (staged phosphor)
-#endif
-// ---- END FX DATA ----
-
-// The arc at normalised time `t` in 0..1, sampled at warped-tube-local `w`
-// (also 0..1). Returns the flash brightness before the IGNITION scale; `ground`
-// is the dark tube face's opacity, 1 while the tube is unlit and falling to 0
-// as the picture is revealed. Pure and branch-ordered, the same shape crt.rs
-// proves in its own unit tests: phases run bloom -> collapse -> pinch, the
-// ground only ever opens, every value stays in range.
-float fx_pattern(vec2 w, float t, out float ground) {
-    float f = 0.0;
-    ground  = 1.0;
-    if (t < FX_BLOOM_END) {
-        // Bloom: ease-OUT flood in from both edges (crt.rs: 1-(1-p)^2), the way
-        // a tube's brightness overshoots and settles rather than ramping.
-        float p   = t / FX_BLOOM_END;
-        float e   = 1.0 - (1.0 - p) * (1.0 - p);
-        float lit = 0.5 * e;
-        float g   = 0.35 + 0.45 * e;
-        if (w.y < lit)             f = g * (1.0 - w.y / max(lit, 1e-4));
-        else if (w.y > 1.0 - lit)  f = g * (1.0 - (1.0 - w.y) / max(lit, 1e-4));
-    } else if (t < FX_COLLAPSE_END) {
-        // Collapse: ease-IN to a scan line (p^2), slow to let go then all at once.
-        float p  = (t - FX_BLOOM_END) / (FX_COLLAPSE_END - FX_BLOOM_END);
-        float e  = p * p;
-        float hh = 0.5 * (1.0 - e);
-        float g  = 0.8 + 0.2 * e;
-        float d  = abs(w.y - 0.5);
-        if (d < hh) f = g * (1.0 - d / max(hh, 1e-4));
-    } else {
-        // Pinch: the line shrinks to a point while a vertical spike makes it a
-        // four-pointed star; the star stays hot for the first half (p^2) and
-        // dies at the end, while the ground opens LINEARLY underneath — the
-        // reveal is under way before the last light is gone.
-        float p  = (t - FX_COLLAPSE_END) / (1.0 - FX_COLLAPSE_END);
-        float e  = p * p;
-        float wd = 0.5 * (1.0 - e);   // horizontal streak half-extent
-        float sp = 0.26 * (1.0 - e);  // vertical flare half-length
-        float g  = 1.0 - e;
-        ground   = 1.0 - p;
-        float dx = abs(w.x - 0.5), dy = abs(w.y - 0.5);
-        float fh = (dy < FX_ARM * 0.5 && dx < wd) ? g * (1.0 - dx / max(wd, 1e-4)) : 0.0;
-        float fv = (dx < FX_ARM * 0.5 && dy < sp) ? g * (1.0 - dy / max(sp, 1e-4)) : 0.0;
-        f = max(fh, fv);
-    }
-    return f;
-}
-
-// The flash for the pixel at screen texcoord `uvs`, composited onto `col`. Runs
-// after the picture is sampled and before the scanline/band/vignette/grade
-// stages, so the glass lays its lines and curve over the flash for free — the
-// same place terminal-delight puts its overlay, "above the grid and below the
-// glass". A no-op at FX_COUNT 0.
-//
-// The warp here is computed from the FX rect and never reused from the pixel's
-// live tube: a dying window's rect may already be owned by the sibling that
-// reflowed into the space, whose tube-local frame is the wrong one. So the
-// flash carries its own copy of the barrel map, keyed to the rect that is
-// firing, and bows with the glass regardless of what now sits under it.
-vec3 fx_add(vec3 col, vec2 uvs, vec2 res) {
-#if FX_COUNT > 0
-    for (int i = 0; i < FX_COUNT; i++) {
-        if (FX_MON[i] != wl_output) continue;
-        vec2 fl = ((uvs * res) - FX_RECT[i].xy) / FX_RECT[i].zw;
-        if (fl.x < 0.0 || fl.x > 1.0 || fl.y < 0.0 || fl.y > 1.0) continue;
-        float ft = (time - FX_START[i]) / FX_S;
-        if (ft < 0.0 || ft >= 1.0) continue;               // before/after: nothing
-        if (FX_KIND[i] == 1) ft = FX_BLOOM_END + ft * (1.0 - FX_BLOOM_END);  // shutdown
-        vec2  c  = fl - 0.5;
-        float r2 = dot(c, c);
-        vec2  w  = 0.5 + c * (1.0 + TUBE_K1 * FX_CURV[i] * r2
-                                  + TUBE_K2 * FX_CURV[i] * r2 * r2);
-        float ground;
-        float f  = fx_pattern(w, ft, ground);
-        if (w.x < 0.0 || w.x > 1.0 || w.y < 0.0 || w.y > 1.0) f = 0.0;  // past the rim
-        col = mix(col, vec3(0.0), ground);                 // the unlit tube face
-        col += FX_TINT[i] * (f * IGNITION);                // the flash, in its tint
-    }
-#endif
-    return col;
-}
-
 float hash(float n) { return fract(sin(n * 127.1) * 43758.5453); }
 
 // Occasional stepped flicker: a 0.45 s burst of five brightness steps —
@@ -475,13 +357,6 @@ void main() {
     float cg = texture(tex, uv).g;
     float cb = texture(tex, tube_map(tube, warp(uv0 - vec2(a, 0.0)), res, ta, tl)).b;
     vec3  col = vec3(cr, cg, cb);
-
-    // The ignition flash, if a window is firing up or going dark over this
-    // pixel right now. It sits on the raw picture and under everything below,
-    // so the scanlines, band, vignette and grade treat it as tube content —
-    // the flash bows and lines up exactly as the terminal it is announcing.
-    // A no-op (dead branch) whenever FX_COUNT is 0, which is the shipped state.
-    col = fx_add(col, uvs, res);
 
     // scanlines: px-true — a 1px dark line then a 1px phosphor-tinted line
     // per SCAN_STEP, following the curve because uv is already warped. The
