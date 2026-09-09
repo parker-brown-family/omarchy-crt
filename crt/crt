@@ -177,14 +177,21 @@ def load():
             st["passthrough"] = [x for x in got["passthrough"] if isinstance(x, str)]
         if isinstance(got.get("quietUnfocused"), bool):
             st["quietUnfocused"] = got["quietUnfocused"]
+        # A KNOB THE TEMPLATE NO LONGER DEFINES IS DROPPED, WHATEVER ITS NAME.
+        #
         # The screen-ignition flash (a tube firing as its window opened and
-        # closed) was removed 2026-09-08. Its two service knobs are retired by
-        # name, because a state file that still carries them would fail every
-        # later render on "no such knob" — the self-bricking commit() exists to
-        # prevent. The old "ignition" toggle key is simply no longer read, and
-        # the next save drops it.
-        for retired in ("IGNITION", "FX_S"):
-            st["service"].pop(retired, None)
+        # closed) was removed 2026-09-08, retiring IGNITION and FX_S, and a
+        # state file still carrying them failed every later render on "no such
+        # knob" — which is how the tube watch died at 13:34:53 that day and
+        # stayed dead for four hours. Naming the two casualties by hand fixed
+        # that removal and nothing after it; the template is the list of knobs
+        # that exist, so it is what state is reconciled against here. The old
+        # "ignition" toggle key is simply no longer read, and the next save
+        # drops it.
+        if TEMPLATE.exists():
+            live = known_knobs(template())
+            st["service"] = {k: v for k, v in st["service"].items()
+                             if k in live or k == "ANIMATED"}
     return st
 
 
@@ -283,7 +290,21 @@ def render(st, path=None, validate=True):
 
     for k, v in expand(st).items():
         if k not in valid:
-            die(f"no such knob: {k}")
+            # A NAME THE TEMPLATE NO LONGER CARRIES IS THE STATE FILE'S PROBLEM,
+            # NOT A REASON TO STOP. Everything reaching here came out of
+            # knobs.json, and a name that has been retired since it was written
+            # is the ordinary consequence of an upgrade — load() reconciles
+            # state against the template, and this catches whatever reaches a
+            # render another way. Dying here took the tube watch down with it:
+            # measured 2026-09-08, the ignition removal left IGNITION in
+            # knobs.json, the running watch exited on it at 13:34:53, and every
+            # theme switch for the next four hours left Hyprland's red banner up
+            # because the watch is what presses it back down. A typo typed at
+            # the CLI is caught before it is ever stored, so nothing is lost by
+            # skipping here.
+            print(f"crt: ignoring retired knob {k} (not in the template)",
+                  file=sys.stderr)
+            continue
         text, n = re.subn(
             rf"^(const float {k}\s*=\s*)-?[0-9.]+(;.*)$",
             lambda m: f"{m.group(1)}{glsl(v)}{m.group(2)}",

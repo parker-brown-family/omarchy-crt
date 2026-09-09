@@ -284,6 +284,34 @@ check "and did not reach the state file" \
 check "the tool still works after a refused setting" \
   "$(constof "$SHADER" SCAN)" "0.3"
 
+# A knob typed at the CLI that does not exist is a typo and is refused. A knob
+# already IN THE STATE FILE that no longer exists is an upgrade, and refusing
+# that one takes the desktop with it: the ignition removal (2026-09-08) retired
+# IGNITION, the running tube watch hit it mid-session, exited on "no such knob",
+# and every theme switch for the next four hours left Hyprland's red banner up
+# because the watch is what presses it back down. The template is the list of
+# knobs that exist; state is reconciled against it rather than trusted. Asserted
+# with a name no release ever shipped: IGNITION and FX_S were the two casualties
+# named by hand at the time, and a test using either of those would pass on the
+# hand list alone and prove nothing about the next removal.
+KNOBS_JSON="$XDG_STATE_HOME/omarchy/crt/knobs.json"
+cat >"$KNOBS_JSON" <<'JSON'
+{
+  "animated": true,
+  "on": true,
+  "panel": {},
+  "passthrough": ["terminal-delight"],
+  "quietUnfocused": true,
+  "service": { "SCAN": 0.42, "RETIRED_KNOB": 0.7 }
+}
+JSON
+"$CRT" render >/dev/null 2>&1
+check "a knob the template has retired does not stop the render" "$?" "0"
+check "the knobs that still exist are applied" "$(constof "$SHADER" SCAN)" "0.42"
+"$CRT" set SCANLINE 0.3 >/dev/null 2>&1
+check "and the retired one is gone from state at the next save" \
+  "$(grep -c RETIRED_KNOB "$KNOBS_JSON")" "0"
+
 if command -v glslangValidator >/dev/null; then
   ok "every render above went through glslangValidator"
 else
