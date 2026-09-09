@@ -364,6 +364,56 @@ check 'a passthrough exists for "crt off" to point at' \
 check "crt.lua names the shader that actually gets built" \
   "$(grep -c "$SHADER" "$HOME/.config/hypr/crt.lua")" "1"
 
+# A RELOAD MUST NOT BE ABLE TO RAISE THE BANNER.
+#
+# `hyprctl reload` drops every runtime keyword, so the damage tier reverts to
+# the config's — and the compile the reload itself triggers happens right
+# there, under that reverted value. Measured on the live desktop 2026-09-08,
+# sampling both settings as fast as hyprctl answers:
+#
+#   18:10:40.814  dt=0 set:true   crt-glass-a.frag     <- steady state
+#   18:10:41.415  dt=2 set:false  crt-glass.frag       <- the reload's compile
+#   18:10:41.569  dt=0 set:true   crt-glass.frag       <- watch, 154 ms later
+#
+# That middle line is the red bar, and `omarchy theme set` reloads the config,
+# so it was on the path of every theme switch. The watch cannot win a race it
+# only hears about afterwards; the tier has to come back WITH the config, in
+# front of the binding. Executed rather than grepped, because what is being
+# asserted is an ORDER between two calls and a value derived from a file — a
+# grep for both strings passes just as happily with them the wrong way round.
+LUA_BIN="$(command -v lua || command -v lua5.4 || command -v luajit || true)"
+if [[ -n "$LUA_BIN" ]]; then
+  cat >"$SANDBOX/tier.lua" <<'LUA'
+local order = {}
+hl = { config = function(t)
+  if t.debug then order[#order + 1] = "tier=" .. tostring(t.debug.damage_tracking) end
+  if t.decoration then order[#order + 1] = "shader" end
+end }
+dofile(os.getenv("CRT_LUA"))
+print(table.concat(order, " "))
+LUA
+  # Drive the block by the shader it reads, not by the renderer: these are the
+  # three states a login or a reload can find on disk.
+  tier_for() {
+    sed -i -E "s/^#define ANIMATED +[01]/#define ANIMATED $1/" "$SHADER"
+    sed -i -E "s/^#define TUBE_COUNT +[0-9]+/#define TUBE_COUNT $2/" "$SHADER"
+    CRT_LUA="$HOME/.config/hypr/crt.lua" "$LUA_BIN" "$SANDBOX/tier.lua"
+  }
+  check "the clock's tier is asserted, and asserted BEFORE the shader is bound" \
+    "$(tier_for 1 5)" "tier=0 shader"
+  check "a still glass with tubes asks the config for tier 1" \
+    "$(tier_for 0 5)" "tier=1 shader"
+  check "and bare glass asks for nothing" "$(tier_for 0 0)" "tier=2 shader"
+  "$CRT" render >/dev/null 2>&1          # undo the hand-edited defines
+else
+  echo "  skip lua not installed — the crt.lua tier block went unexecuted"
+fi
+# The value is read from the shader at config time rather than frozen into the
+# block at install time, so a `crt set ANIMATED 1` between installs cannot
+# leave the config asserting a tier the shader has since outgrown.
+check "the tier follows the shader on disk, not whatever install day saw" \
+  "$(grep -cF '#define ANIMATED%s+1' "$HOME/.config/hypr/crt.lua")" "1"
+
 # ---------------------------------------------------------------------------
 # STAYING OUT OF THE THEME'S WAY.
 #

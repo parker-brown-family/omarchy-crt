@@ -733,15 +733,20 @@ def tubes_watch():
                         dirty = True
                         reset_preconditions()   # reload dropped them at runtime
                         # The reload also recompiled crt-glass.frag itself
-                        # (crt.lua re-asserts the path at config time) under
-                        # the config-default damage tier — with the clock on,
-                        # that compile raises the sticky red banner EVERY
-                        # reload, and the tier the next build restates only
-                        # protects the compile after it. Nothing else takes
-                        # that banner down: apply()'s press is full-path only,
-                        # and hypr-error-watch polls too slowly to ever see
-                        # the tier wrong. Queue a press for after the burst
-                        # build, once the compile that would re-raise is done.
+                        # (crt.lua re-asserts the path at config time). The
+                        # installed crt.lua now sets the damage tier from that
+                        # shader in front of the binding, so the compile no
+                        # longer sees the config default and raises nothing —
+                        # but a crt.lua written before that change is still on
+                        # disk until the next `crt install`, and under it the
+                        # banner goes up ~150 ms before this watch can restate
+                        # the tier. Nothing else takes it down: apply()'s press
+                        # is full-path only, and hypr-error-watch polls too
+                        # slowly to ever see the tier wrong. Queue a press for
+                        # after the burst build, once the compile that would
+                        # re-raise is done. It costs one hyprctl call per
+                        # reload and it is what makes an un-reinstalled box
+                        # recover on its own.
                         banner_pending = True
                     if name in WATCH_EVENTS:
                         dirty = True
@@ -1158,10 +1163,27 @@ def install():
 -- over a theme that also sets screen_shader. That ordering is the whole reason
 -- the CRT can outlive a theme switch: the picture is the plugin's, the colours
 -- come from whatever theme happens to be on.
+--
+-- THE DAMAGE TIER IS SET HERE, BEFORE THE SHADER, AND IT IS READ OFF THE
+-- SHADER. A config reload drops every runtime keyword, so the tier reverts to
+-- the config's — and the compile the reload itself triggers happens right
+-- there, under whatever that reverted value is. With the clock on, that
+-- compile is the one Hyprland puts its red bar across the desktop for. The
+-- watch does restate the tier on configreloaded, but only ~150 ms later, which
+-- is after the compile it needed to protect. Deriving the tier here means it
+-- comes back WITH the config, in front of the binding, and there is no window
+-- for the banner at all. Tiers: the clock costs 0 (Hyprland insists, in red),
+-- a still glass with tubes costs 1 (a damaged frame is repainted whole, so the
+-- gather never samples a stale neighbour), bare glass costs nothing.
 local frag = "{SHADER}"
 local probe = io.open(frag, "r")
 if probe then
+  local src = probe:read("*a")
   probe:close()
+  local tier = 2
+  if (tonumber(src:match("#define TUBE_COUNT%s+(%d+)")) or 0) > 0 then tier = 1 end
+  if src:match("#define ANIMATED%s+1") then tier = 0 end
+  hl.config({{ debug = {{ damage_tracking = tier }} }})
   hl.config({{ decoration = {{ screen_shader = frag }} }})
 end
 {END}
