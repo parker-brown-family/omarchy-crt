@@ -76,6 +76,10 @@ exit 0
 STUB
 cat >"$SANDBOX/bin/systemctl" <<'STUB'
 #!/usr/bin/env bash
+# The version matters now: the watcher unit is only installed when systemd is
+# new enough to have ExecCondition=, and a stub that stayed silent about its
+# version would have the installer guessing about the thing under test.
+[[ "$1" == "--version" ]] && { echo "systemd 261 (261.2-1-arch)"; exit 0; }
 [[ "$*" == *"is-active td-tubes.service"* ]] && cat "$TD_TUBES_STATE"
 exit 0
 STUB
@@ -625,6 +629,182 @@ check "and there is an override for someone who has read the reason" \
   "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$SHADER")" "#define TUBE_COUNT 2"
 rm -f "$TUBEFILE"
 "$CRT" render >/dev/null 2>&1
+
+echo
+echo "what the plugin leaves behind cannot run once the plugin is gone"
+# ---------------------------------------------------------------------------
+# A screen shader has to be in Hyprland's config, a theme switch has to reach
+# omarchy's hook directory, and a watcher has to be a systemd user unit. All
+# three are files in the user's config that point BACK at the checkout, and
+# `omarchy plugin remove` deletes the checkout and runs nothing of ours on the
+# way out — omarchy has no plugin lifecycle hook for it to run. So these cannot
+# be cleaned up AT removal. What replaces that is the guard: every registration
+# calls it first, it refuses unless the plugin is still there and is still this
+# plugin, and it takes the whole set down when the plugin is decisively gone.
+#
+# Raised by a marketplace reviewer on omacom/omarchy-plugin-marketplace#5384,
+# 2026-09-10: "a later reuse/recreation of that pathname would become code
+# executed by systemd or on a theme change, outside marketplace validation."
+# ---------------------------------------------------------------------------
+UNITF="$XDG_CONFIG_HOME/systemd/user/crt-tubes.service"
+GUARDF="$XDG_STATE_HOME/omarchy/crt/crt-guard"
+PASSF="$XDG_STATE_HOME/omarchy/crt/passthrough.frag"
+LUAF="$HOME/.config/hypr/crt.lua"
+PLUGDIR="$XDG_CONFIG_HOME/omarchy/plugins"
+HYPRLANDF="$HOME/.config/hypr/hyprland.lua"
+
+# A COPY of the plugin, symlinked where omarchy would put it — because the
+# thing under test is what happens when that link is broken, and breaking it
+# must never mean reaching into the real checkout to do it.
+FAKEPLUG="$SANDBOX/plugin"
+mkdir -p "$FAKEPLUG/crt" "$PLUGDIR"
+cp "$REPO/manifest.json" "$FAKEPLUG/"
+cp "$REPO/crt/crt" "$REPO/crt/crt-glass.frag" "$REPO/crt/crt-tubes.service" "$FAKEPLUG/crt/"
+ln -sfn "$FAKEPLUG" "$PLUGDIR/brownfamilysports.crt"
+FCRT="$FAKEPLUG/crt/crt"
+
+echo inactive >"$TD_TUBES_STATE"
+"$CRT" uninstall >/dev/null 2>&1
+rm -f "$LUAF" "$HOOK" "$UNITF" "$GUARDF"
+"$FCRT" install >/dev/null 2>&1
+
+# The registration names the ONE path removal touches. It used to name the
+# resolved path, so on a dev-linked checkout `omarchy plugin remove` unlinked
+# the plugin and the watcher carried on running from the work tree, which is
+# the finding one layer beneath the one that was reported.
+check "the unit names the plugin by the path removal actually touches" \
+  "$(grep -c "^ExecStart=$PLUGDIR/brownfamilysports.crt/crt/crt tubes watch$" "$UNITF")" "1"
+check "and will not start unless the guard agrees first" \
+  "$(grep -c "^ExecCondition=$GUARDF check$" "$UNITF")" "1"
+check "the theme hook goes through the guard, never at the plugin directly" \
+  "$(grep -c "$GUARDF run render" "$HOOK")" "1"
+
+# The guard decides whether to disarm by reading the id out of manifest.json,
+# so the copy of that id compiled into the tool has to be the manifest's. A
+# drift between them reads as "somebody else's plugin is at our path" and
+# disarms every install on the next theme switch.
+check "the id the guard checks for is the id the manifest declares" \
+  "$(sed -nE 's/^PLUGIN_ID = "([^"]+)"$/\1/p' "$REPO/crt/crt")" \
+  "$(sed -nE 's/^[[:space:]]*"id"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$REPO/manifest.json")"
+
+if command -v shellcheck >/dev/null; then
+  shellcheck -s bash "$GUARDF" "$HOOK" >/dev/null 2>&1
+  check "the generated guard and hook pass shellcheck" "$?" "0"
+else
+  echo "  skip shellcheck not installed — the generated bash went unchecked"
+fi
+
+"$GUARDF" check
+check "with the plugin installed the guard says go" "$?" "0"
+check "and took nothing down saying it" \
+  "$([[ -f $UNITF && -f $HOOK && -f $LUAF && -f $GUARDF ]] && echo y || echo n)" "y"
+
+# UNKNOWN IS NOT GONE, and this is the case that makes the rest safe to ship.
+# A checkout that is there but cannot be read is what an interrupted
+# `omarchy plugin update` looks like from here. Disarming on it would delete a
+# working install's wiring on the strength of a file being briefly absent.
+mv "$FAKEPLUG/manifest.json" "$SANDBOX/manifest.parked"
+"$GUARDF" check
+check "a checkout it cannot read refuses to run" "$?" "1"
+check "and does NOT disarm, because unreadable is not removed" \
+  "$([[ -f $UNITF && -f $HOOK && -f $LUAF && -f $GUARDF ]] && echo y || echo n)" "y"
+mv "$SANDBOX/manifest.parked" "$FAKEPLUG/manifest.json"
+"$GUARDF" check
+check "and goes again once it can read the checkout" "$?" "0"
+
+# FOREIGN. Somebody else's plugin at our pathname is the reviewer's scenario,
+# and it must be refused rather than executed.
+sed -i 's/"brownfamilysports.crt"/"someone.else"/' "$FAKEPLUG/manifest.json"
+"$GUARDF" check
+check "a manifest naming another plugin refuses" "$?" "1"
+check "and disarms, rather than executing what moved in" \
+  "$([[ -f $UNITF || -f $HOOK || -f $LUAF || -f $GUARDF ]] && echo y || echo n)" "n"
+sed -i 's/"someone.else"/"brownfamilysports.crt"/' "$FAKEPLUG/manifest.json"
+
+# GONE — the actual `omarchy plugin remove` path for a linked plugin. The live
+# shader goes back to the passthrough too, so the glass does not sit on a
+# desktop whose owner has just removed the plugin.
+"$FCRT" install >/dev/null 2>&1
+printf '%s' "$XDG_STATE_HOME/omarchy/crt/crt-glass-a.frag" >"$SHADER_STATE"
+rm -f "$PLUGDIR/brownfamilysports.crt"
+"$GUARDF" check
+check "with the plugin removed the guard refuses" "$?" "1"
+check "and the unit is gone" "$([[ -f $UNITF ]] && echo y || echo n)" "n"
+check "and the theme hook is gone" "$([[ -f $HOOK ]] && echo y || echo n)" "n"
+check "and crt.lua is gone" "$([[ -f $LUAF ]] && echo y || echo n)" "n"
+check "and the require() line with it" \
+  "$(grep -c 'require("hypr.crt")' "$HYPRLANDF")" "0"
+check "and the guard removed itself, last" \
+  "$([[ -f $GUARDF ]] && echo y || echo n)" "n"
+check "and the live shader is back to the passthrough" \
+  "$(cat "$SHADER_STATE")" "$PASSF"
+
+# A DISARM IS NOT A LICENCE TO DELETE. Whatever took one of those pathnames
+# over after us is somebody else's file.
+ln -sfn "$FAKEPLUG" "$PLUGDIR/brownfamilysports.crt"
+"$FCRT" install >/dev/null 2>&1
+printf 'not ours\n' >"$LUAF"
+rm -f "$PLUGDIR/brownfamilysports.crt"
+"$GUARDF" check >/dev/null 2>&1
+check "a file at our path that is not ours survives the disarm" \
+  "$(cat "$LUAF")" "not ours"
+check "while the ones that were ours still went" \
+  "$([[ -f $UNITF || -f $HOOK ]] && echo y || echo n)" "n"
+
+# ---------------------------------------------------------------------------
+# THE SAME QUESTION ON THE WAY IN. ~/.config/hypr/crt.lua is a name another
+# program could plausibly pick, and the version of this that wrote whatever it
+# found would eat that file — then delete it again at uninstall.
+# ---------------------------------------------------------------------------
+ln -sfn "$FAKEPLUG" "$PLUGDIR/brownfamilysports.crt"
+rm -f "$UNITF" "$HOOK" "$GUARDF"
+printf 'not ours\n' >"$LUAF"
+"$FCRT" install >/dev/null 2>&1
+check "install refuses a path holding a file that is not ours" "$?" "1"
+check "and leaves that file exactly as it found it" "$(cat "$LUAF")" "not ours"
+check "and wrote NOTHING before refusing" \
+  "$([[ -f $UNITF || -f $HOOK || -f $GUARDF ]] && echo y || echo n)" "n"
+
+rm -f "$LUAF"
+ln -sfn /dev/null "$HOOK"
+"$FCRT" install >/dev/null 2>&1
+check "install refuses to write through a symlink" "$?" "1"
+check "and still wrote nothing" \
+  "$([[ -f $LUAF || -f $UNITF || -f $GUARDF ]] && echo y || echo n)" "n"
+rm -f "$HOOK"
+
+"$FCRT" install >/dev/null 2>&1
+check "with the paths clear it installs" \
+  "$([[ -f $LUAF && -f $HOOK && -f $UNITF && -f $GUARDF ]] && echo y || echo n)" "y"
+"$FCRT" install >/dev/null 2>&1
+check "and installing over its own files is just an upgrade" "$?" "0"
+
+# AN UPGRADE MUST NOT MEET A REFUSAL. The installs already on disk were written
+# before any of this existed and carry no marker, and "no marker" and "somebody
+# else's file" are the same thing to the check above unless the earlier
+# signatures count as evidence too. Getting this wrong means every existing user
+# upgrades into a tool that will not install and a desktop they repair by hand.
+"$FCRT" uninstall >/dev/null 2>&1
+rm -f "$LUAF" "$HOOK" "$UNITF" "$GUARDF"
+printf '%s\n' '-- >>> omarchy-crt (managed by `crt install`) >>>' 'stale' \
+  '-- <<< omarchy-crt <<<' >"$LUAF"
+printf '%s\n' '#!/bin/bash' "# Installed by omarchy-crt's \`crt install\`." >"$HOOK"
+printf '%s\n' '[Unit]' \
+  "Description=Delight-O-Matic — keep the CRT's per-surface rects true" >"$UNITF"
+"$FCRT" install >/dev/null 2>&1
+check "an install written before the guard existed upgrades in place" "$?" "0"
+check "and every registration carries the marker afterwards" \
+  "$(grep -lF 'omarchy-crt:owned brownfamilysports.crt' \
+     "$LUAF" "$HOOK" "$UNITF" "$GUARDF" 2>/dev/null | wc -l)" "4"
+
+printf 'not ours either\n' >"$UNITF"
+"$FCRT" uninstall >/dev/null 2>&1
+check "uninstall leaves a path that stopped being ours" \
+  "$(cat "$UNITF")" "not ours either"
+check "and removes the ones that still are" \
+  "$([[ -f $LUAF || -f $HOOK || -f $GUARDF ]] && echo y || echo n)" "n"
+rm -f "$UNITF"
+rm -f "$PLUGDIR/brownfamilysports.crt"
 
 echo
 echo "the QML is at least syntactically a plugin"

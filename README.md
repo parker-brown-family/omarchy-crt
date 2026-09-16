@@ -153,9 +153,17 @@ Which is why there is a watcher and not a snapshot:
 ```bash
 crt tubes watch
 ```
+
+or, under systemd, for the whole session:
+
 ```bash
-systemctl --user enable --now crt-tubes.service
+crt install
 ```
+
+`crt install` is what writes that unit and enables it. Enabling it by hand is
+not a shortcut past this — there is nothing to enable until the install has
+written it, and what the install writes is a unit that will not start unless
+the guard below says the plugin is still there.
 
 Layer surfaces are what make the distinction matter. A tray, a menu, a
 notification and the lock screen each exist for a few seconds, so none of them
@@ -199,17 +207,42 @@ occlusion rule included. `crt install` puts the watcher under systemd for you.
 The optics are a port of [terminal-delight](https://github.com/parker-brown-family/terminal-delight)'s
 own display stack, dial for dial.
 
-## Removal
+## Removal, and what happens if you skip the tidy version
 
 ```bash
 omarchy plugin remove brownfamilysports.crt --yes
 ```
 
-`crt uninstall` (run it first if you want a tidy exit) takes the Hyprland
-wiring, the theme-set hook and the systemd unit back out; the plugin directory
-going away removes the rest. Your knobs in `$XDG_STATE_HOME/omarchy/crt/` are
-deliberately left, so a reinstall picks up where you left off — delete that
-directory to forget everything.
+`crt uninstall` is the tidy exit and takes the Hyprland wiring, the theme-set
+hook, the systemd unit and the guard back out itself. It removes only files that
+still carry this plugin's marker; anything that has since become somebody else's
+is left where it is and named on stderr.
+
+**You do not have to remember to run it.** A screen shader has to be named in
+Hyprland's config, a theme switch has to reach omarchy's hook directory and a
+watcher has to be a systemd user unit — so three files outside this checkout
+point back at it, and `omarchy plugin remove` deletes the checkout while running
+nothing of ours on the way out. It has nothing to run: omarchy's hook directory
+carries `theme-set.d`, `font-set.d`, `post-boot.d`, `post-update.d`,
+`battery-low.d` and `pre-refresh-pacman.d`, and nothing at all for a plugin being
+added or removed.
+
+So the registrations are built not to need cleaning up. Each one calls
+`$XDG_STATE_HOME/omarchy/crt/crt-guard` before it does anything, and the guard
+checks the plugin is still there and is still this plugin — the unit through
+systemd's own `ExecCondition=`, the theme hook as its first line. When the
+plugin is decisively gone, or a different plugin has taken its pathname, the
+guard removes every registration this plugin made, itself included, and refuses
+to run. A pathname recreated later by something else is never executed.
+
+Decisively is doing work in that sentence. A checkout that is *there but
+unreadable* is what a half-finished `omarchy plugin update` looks like from the
+outside, and it is not a removal: the guard refuses to run and deliberately does
+**not** disarm, so an update that takes its time cannot cost you your wiring.
+
+Your knobs in `$XDG_STATE_HOME/omarchy/crt/` are deliberately left either way, so
+a reinstall picks up where you left off — delete that directory to forget
+everything.
 
 ## Dependencies
 

@@ -17,7 +17,20 @@ ConditionEnvironment=HYPRLAND_INSTANCE_SIGNATURE
 
 [Service]
 Type=simple
-# %h is the user's home; the plugin is cloned under ~/.config/omarchy/plugins.
+# omarchy-crt:owned brownfamilysports.crt
+#
+# NOTHING STARTS UNTIL THE GUARD SAYS THE PLUGIN IS STILL THERE AND IS STILL
+# THIS PLUGIN. `omarchy plugin remove` deletes the checkout and runs nothing of
+# ours on the way out — omarchy has no plugin lifecycle hook for it to run — so
+# without this an orphaned unit would execute whatever later occupies the path
+# below. The guard refuses that, and takes this unit down with it. A failing
+# ExecCondition skips the start cleanly: it is not a failure and does not trip
+# Restart=. It needs systemd 243 or newer, which `crt install` checks for.
+#
+# %h is the user's home. Both paths are rewritten absolute by `crt install`,
+# which points them at ~/.config/omarchy/plugins/<id> whenever the plugin is
+# reachable there — the one path `omarchy plugin remove` actually touches.
+ExecCondition=%h/.local/state/omarchy/crt/crt-guard check
 ExecStart=%h/.config/omarchy/plugins/brownfamilysports.crt/crt/crt tubes watch
 # The watch flattens the glass on the way out, so a stop or a crash leaves a
 # plain desktop rather than the last layout's rects bending whatever moved in.
