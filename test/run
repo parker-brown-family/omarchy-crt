@@ -819,6 +819,43 @@ if command -v qmllint >/dev/null; then
   echo "  note qmllint needs Quickshell's type registration; run it inside omarchy-shell"
 fi
 
+# ---------------------------------------------------------------------------
+echo
+echo "CI runs nothing that was not reviewed, and holds no token it does not need"
+# ---------------------------------------------------------------------------
+# EVERY ACTION A WORKFLOW RUNS IS SOMEBODY ELSE'S CODE HOLDING THIS REPOSITORY'S
+# TOKEN, and a tag is a pointer its owner can move. `@v5` therefore means
+# "whatever that repository is on the day CI happens to run", which is not a
+# thing anybody reviewed. A workflow that declares no `permissions:` takes the
+# default token, which is more than this one needs.
+#
+# This was true here and in both sibling plugins, and it was found by a
+# marketplace supply-chain review of the OTHER one
+# (omacom/omarchy-plugin-marketplace#5534, 2026-09-17) rather than by us — which
+# is the reason it is a check and not a resolution. The same review had already
+# flagged the same shape twice; a class that keeps coming back is a class that
+# needs a gate.
+# ---------------------------------------------------------------------------
+WF_BAD=0
+for wf in "$REPO"/.github/workflows/*.yml "$REPO"/.github/workflows/*.yaml; do
+  [[ -e $wf ]] || continue
+  while IFS= read -r u; do
+    [[ $u == ./* ]] && continue          # a local action is this repo's own code
+    ref="${u##*@}"
+    if [[ ! $ref =~ ^[0-9a-f]{40}$ ]]; then
+      WF_BAD=$((WF_BAD + 1))
+      echo "       ${wf##*/}: uses $u — a movable ref, not a commit"
+    fi
+  done < <(grep -oE '^[^#]*uses:[[:space:]]*[^[:space:]]+' "$wf" \
+           | sed -E 's/^.*uses:[[:space:]]*//')
+  if ! grep -qE '^permissions:' "$wf"; then
+    WF_BAD=$((WF_BAD + 1))
+    echo "       ${wf##*/}: declares no permissions, so it takes the default token"
+  fi
+done
+check "every action is pinned to a commit, and every workflow says what it may touch" \
+  "$WF_BAD" "0"
+
 echo
 echo "  $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
