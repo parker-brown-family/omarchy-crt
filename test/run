@@ -56,6 +56,7 @@ export HYPRCTL_LOG="$SANDBOX/hyprctl.log"
 export SHADER_STATE="$SANDBOX/screen_shader"
 export TD_TUBES_STATE="$SANDBOX/td-tubes-active"
 export DAMAGE_STATE="$SANDBOX/damage_tracking"
+export SYSTEMCTL_LOG="$SANDBOX/systemctl.log"
 : >"$SHADER_STATE"
 echo inactive >"$TD_TUBES_STATE"
 echo 2 >"$DAMAGE_STATE"
@@ -80,7 +81,9 @@ cat >"$SANDBOX/bin/systemctl" <<'STUB'
 # new enough to have ExecCondition=, and a stub that stayed silent about its
 # version would have the installer guessing about the thing under test.
 [[ "$1" == "--version" ]] && { echo "systemd 261 (261.2-1-arch)"; exit 0; }
+echo "$*" >>"$SYSTEMCTL_LOG"
 [[ "$*" == *"is-active td-tubes.service"* ]] && cat "$TD_TUBES_STATE"
+[[ "$*" == *"stop td-tubes.service"* ]] && echo inactive >"$TD_TUBES_STATE"
 exit 0
 STUB
 chmod +x "$SANDBOX/bin/hyprctl" "$SANDBOX/bin/systemctl"
@@ -226,7 +229,7 @@ check "starting the clock switches damage tracking off, as Hyprland asks" \
 check "stopping it hands damage tracking back" "$(cat "$DAMAGE_STATE")" "2"
 "$CRT" off >/dev/null 2>&1
 "$CRT" set TRACKING 0.5 >/dev/null 2>&1
-check "and a lifted glass never pays for a clock it is not drawing" \
+check "and a switched-off CRT never pays for a clock it is not drawing" \
   "$(cat "$DAMAGE_STATE")" "2"
 "$CRT" on >/dev/null 2>&1
 check "putting the glass back pays it again" "$(cat "$DAMAGE_STATE")" "0"
@@ -392,7 +395,7 @@ local order = {}
 hl = { config = function(t)
   if t.debug then order[#order + 1] = "tier=" .. tostring(t.debug.damage_tracking) end
   if t.decoration then order[#order + 1] = "shader" end
-end }
+end, bind = function() end, dsp = { exec_cmd = function(c) return c end } }
 dofile(os.getenv("CRT_LUA"))
 print(table.concat(order, " "))
 LUA
@@ -629,6 +632,118 @@ check "and there is an override for someone who has read the reason" \
   "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$SHADER")" "#define TUBE_COUNT 2"
 rm -f "$TUBEFILE"
 "$CRT" render >/dev/null 2>&1
+
+echo
+echo "off is the whole CRT, not plain glass over a running one"
+# ---------------------------------------------------------------------------
+# WHAT THE OLD "LIFT" LOOKED LIKE ON A REAL DESKTOP, 2026-10-14: tiles that
+# could not decide whether they were warped. Lifting pointed the screen shader
+# at the passthrough and left three things binding one anyway — this plugin's
+# watch on every focus change; td-tubes, the theme's watcher, which a theme-set
+# hook had started that morning and which binds the theme's glass on every
+# layout event; and crt.lua, binding the full glass at every reload. Hovering
+# from tile to tile flipped the screen between the two watchers. So off stops
+# both, and the reload reads the switch before it binds anything.
+# ---------------------------------------------------------------------------
+PASSF_="$XDG_STATE_HOME/omarchy/crt/passthrough.frag"
+GUARDF_="$XDG_STATE_HOME/omarchy/crt/crt-guard"
+LUAF_="$HOME/.config/hypr/crt.lua"
+echo inactive >"$TD_TUBES_STATE"
+"$CRT" install >/dev/null 2>&1
+cat >"$TUBEFILE" <<'TUBES'
+#define TUBE_COUNT 2
+#if TUBE_COUNT > 0
+const vec4 TUBE_RECT[TUBE_COUNT] = vec4[TUBE_COUNT](
+    vec4(0.0, 0.0, 960.0, 1080.0),
+    vec4(960.0, 0.0, 960.0, 1080.0)
+);
+const int  TUBE_MON[TUBE_COUNT]  = int[TUBE_COUNT](
+    0, 0
+);
+const float TUBE_CURV[TUBE_COUNT] = float[TUBE_COUNT](
+    1.0, 1.0
+);
+#endif
+TUBES
+# This shell stands in for a watcher whose pid file outlived it: alive, but
+# not a `crt tubes watch`. Signalling it would kill the test run.
+echo $$ >"$PIDFILE"
+echo active >"$TD_TUBES_STATE"
+: >"$SYSTEMCTL_LOG"
+"$CRT" off >/dev/null 2>&1
+check "off parks td-tubes, the second owner of the screen shader" \
+  "$(cat "$TD_TUBES_STATE")" "inactive"
+check "and stops its own watcher" \
+  "$(grep -cx -- '--user stop crt-tubes.service' "$SYSTEMCTL_LOG")" "1"
+check "Hyprland is pointed at the passthrough" "$(cat "$SHADER_STATE")" "$PASSF_"
+check "damage tracking goes back to Hyprland's default" "$(cat "$DAMAGE_STATE")" "2"
+check "and so does the cursor" \
+  "$(grep -E '^keyword cursor:no_hardware_cursors' "$HYPRCTL_LOG" | tail -1)" \
+  "keyword cursor:no_hardware_cursors 2"
+check "no rects are left for a watcher that is not coming back" \
+  "$(grep -oE '^#define TUBE_COUNT [0-9]+' "$TUBEFILE")" "#define TUBE_COUNT 0"
+check "a pid file naming something that is not a crt watch is cleared, not signalled" \
+  "$([[ -f $PIDFILE ]] && echo y || echo n)" "n"
+check "and the switch is in state, where the next login reads it" \
+  "$(grep -c '"on": false' "$XDG_STATE_HOME/omarchy/crt/knobs.json")" "1"
+
+# THE RELOAD. Executed under lua for the same reason the tier block above is:
+# what matters is which path gets bound, not which strings appear in the file.
+if [[ -n "$LUA_BIN" ]]; then
+  cat >"$SANDBOX/power.lua" <<'LUA'
+local seen = {}
+hl = { config = function(t)
+  if t.debug then seen[#seen + 1] = "tier=" .. tostring(t.debug.damage_tracking) end
+  if t.decoration then
+    seen[#seen + 1] = "shader=" .. t.decoration.screen_shader:match("[^/]+$")
+  end
+end, bind = function(keys, cmd) seen[#seen + 1] = "bind=" .. keys .. "|" .. cmd end,
+dsp = { exec_cmd = function(c) return c end } }
+dofile(os.getenv("CRT_LUA"))
+print(table.concat(seen, " "))
+LUA
+  reload() { CRT_LUA="$LUAF_" "$LUA_BIN" "$SANDBOX/power.lua"; }
+  check "a reload while off binds the passthrough, asks for no tier, and binds the key" \
+    "$(reload)" "shader=passthrough.frag bind=SUPER + CTRL + SHIFT + L|$GUARDF_ run toggle"
+fi
+
+env -u HYPRLAND_INSTANCE_SIGNATURE timeout 10 "$CRT" tubes watch >/dev/null 2>&1
+check "a watch started while off — which is what login does — exits clean" "$?" "0"
+check "without claiming to be the watcher" \
+  "$([[ -f $PIDFILE ]] && echo y || echo n)" "n"
+
+echo active >"$TD_TUBES_STATE"
+: >"$SYSTEMCTL_LOG"
+"$CRT" toggle >/dev/null 2>&1
+check "toggle switches it back on" \
+  "$(grep -c '"on": true' "$XDG_STATE_HOME/omarchy/crt/knobs.json")" "1"
+check "and starts the watcher, which brings the tubes" \
+  "$(grep -cx -- '--user start crt-tubes.service' "$SYSTEMCTL_LOG")" "1"
+check "parking td-tubes on the way in as well" "$(cat "$TD_TUBES_STATE")" "inactive"
+check "with the glass bound again" \
+  "$(grep -cE '/crt-glass-[ab]\.frag$' "$SHADER_STATE")" "1"
+if [[ -n "$LUA_BIN" ]]; then
+  check "and a reload binding the glass, not the passthrough" \
+    "$(reload | grep -oE 'shader=[^ ]+')" "shader=crt-glass.frag"
+fi
+"$CRT" toggle >/dev/null 2>&1
+check "toggle is a toggle" \
+  "$(grep -c '"on": false' "$XDG_STATE_HOME/omarchy/crt/knobs.json")" "1"
+
+# AN UPGRADE GETS THE SWITCH AT THE NEXT FLICK. A crt.lua written before it
+# existed binds the glass at every reload whatever the switch says — the third
+# owner — and has no key. Only ever rewritten when it is ours.
+printf '%s\n' '-- >>> omarchy-crt (managed by `crt install`) >>>' 'stale' \
+  '-- <<< omarchy-crt <<<' >"$LUAF_"
+"$CRT" on >/dev/null 2>&1
+check "an older crt.lua is brought up to the switch" \
+  "$(grep -cF '"on"%s*:%s*false' "$LUAF_")" "1"
+printf 'not ours\n' >"$LUAF_"
+"$CRT" off >/dev/null 2>&1
+check "a crt.lua that is not ours is left alone" "$(cat "$LUAF_")" "not ours"
+rm -f "$LUAF_"
+"$CRT" on >/dev/null 2>&1
+rm -f "$TUBEFILE"
 
 echo
 echo "what the plugin leaves behind cannot run once the plugin is gone"

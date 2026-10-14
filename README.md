@@ -77,13 +77,36 @@ crt set SCAN 0.35 SCAN_STEP 3
 ```bash
 crt quiet off
 ```
-```bash
-crt off
-```
 
 A knob you set by hand outranks the macro that would otherwise cover it, until
 you turn that macro again. `crt` on its own prints both tiers and where every
 file lives.
+
+## Switching it off
+
+**SUPER + CTRL + SHIFT + L** switches the whole CRT off, and again switches it
+back on — L for gLass. So does the **POWER** row in the tray, a right-click on
+the bar icon, or:
+
+```bash
+crt toggle
+```
+
+Off means the whole set, not a sheet of plain glass over one still running: the
+tube watcher stops, the screen shader goes to a passthrough, damage tracking and
+the cursor go back to Hyprland's defaults, and a config reload while it is off
+binds the passthrough rather than the glass. Nothing is uninstalled. Your knobs
+are kept, the watcher stays enabled and simply declines to start at login while
+the switch says off, and switching back on brings the tubes back.
+
+This replaced a *lift* that only swapped in the passthrough, and that turned
+out to be three things still binding a shader at once — this plugin's own
+watcher on every focus change, the glass coming back at every reload, and the
+terminal-delight theme's `td-tubes` binding its glass on every layout event. The
+last of those is why the switch also stops `td-tubes.service` if it finds it
+running, in either direction: two programs binding one screen shader do not
+error, they take turns, and on a desktop that looks like tiles flickering
+between warped and flat as the pointer crosses them.
 
 ## How it works, and the two things worth knowing
 
@@ -116,7 +139,7 @@ three tiers to match:
 |---|---|---|
 | clock running | 0 | the whole screen redraws every frame — Hyprland's red banner names this price, and it is real |
 | still glass, tubes up | 1 | a change repaints its whole monitor; an idle monitor draws nothing |
-| glass off | 2 | Hyprland's default |
+| switched off | 2 | Hyprland's default |
 
 Tier 1 is the quiet discovery: the gather only ever needed "repaint the whole
 monitor when anything changes", not "repaint everything always" — so a still

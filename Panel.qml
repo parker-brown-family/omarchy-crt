@@ -74,7 +74,9 @@ Panel {
 
   readonly property var panelKnobs: (live && live.panel) ? live.panel : ({})
   readonly property var consts: (live && live.consts) ? live.consts : ({})
-  readonly property bool glassOn: !live || live.on !== false
+  // The power switch for the whole CRT. Absent is not off: a live.json written
+  // before the key existed has said nothing, and the set stays on.
+  readonly property bool powerOn: !live || live.on !== false
   readonly property bool animated: !!(live && live.animated)
   readonly property int tubes: (live && typeof live.tubes === "number") ? live.tubes : 0
 
@@ -110,7 +112,8 @@ Panel {
 
   readonly property string heroMeta: {
     if (!installed) return "not wired into Hyprland yet"
-    var parts = [glassOn ? "glass on" : "glass lifted"]
+    if (!powerOn) return "switched off"
+    var parts = ["on"]
     parts.push(tubes > 0 ? tubes + " tubes" : "no tubes — flat glass")
     if (animated) parts.push("clock running")
     return parts.join("  ·  ")
@@ -135,8 +138,10 @@ Panel {
     crt("set " + name + " " + value.toFixed(3))
   }
 
-  function toggleGlass() {
-    crt(glassOn ? "off" : "on")
+  // Off is the whole CRT — watchers, tubes and glass — not a sheet of plain
+  // glass over one still running. The same switch as SUPER+CTRL+SHIFT+L.
+  function togglePower() {
+    crt(powerOn ? "off" : "on")
   }
 
   // ------------------------------------------------------------ keyboard nav
@@ -244,7 +249,9 @@ Panel {
     function open(): void { root.open() }
     function close(): void { root.close() }
     function toggle(): void { root.toggle() }
-    function glass(): void { root.toggleGlass() }
+    function power(): void { root.togglePower() }
+    // The name this had when it lifted the glass; it now throws the switch.
+    function glass(): void { root.togglePower() }
   }
 
   // ------------------------------------------------------------- bar button
@@ -259,14 +266,14 @@ Panel {
     // bar with no error anywhere to explain it. md-television_classic
     // (U+F07DD) is the other honest choice if you want the TV instead.
     text: "󰟀"
-    active: root.installed && root.glassOn
+    active: root.installed && root.powerOn
     tooltipText: root.installed
-      ? ("CRT — " + root.heroMeta)
+      ? ("CRT — " + root.heroMeta + "  ·  right-click or super+ctrl+shift+L switches it")
       : "CRT — click to wire the glass into Hyprland"
     onPressed: function (buttonCode) {
       // Right-click is the one thing worth doing without reading the tray:
-      // take the glass off, look at the flat picture, put it back.
-      if (buttonCode === Qt.RightButton && root.installed) root.toggleGlass()
+      // switch it off, look at the flat picture, switch it back on.
+      if (buttonCode === Qt.RightButton && root.installed) root.togglePower()
       else root.toggle()
     }
   }
@@ -300,8 +307,8 @@ Panel {
         if (dx !== 0) root.moveCursor(dx)
         if (dy !== 0) root.turnCursor(-dy)     // up turns clockwise
       }
-      onActivateRequested: root.toggleGlass()
-      onReturnRequested: root.toggleGlass()
+      onActivateRequested: root.togglePower()
+      onReturnRequested: root.togglePower()
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
 
@@ -382,8 +389,8 @@ Panel {
               anchors.left: parent.left
               anchors.leftMargin: Style.space(12)
               anchors.verticalCenter: parent.verticalCenter
-              text: root.glassOn ? "GLASS ON" : "GLASS LIFTED"
-              color: root.glassOn ? root.phosphor : root.dim
+              text: root.powerOn ? "POWER ON" : "POWER OFF"
+              color: root.powerOn ? root.phosphor : root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
               font.letterSpacing: 1.2
@@ -393,7 +400,8 @@ Panel {
               anchors.right: parent.right
               anchors.rightMargin: Style.space(12)
               anchors.verticalCenter: parent.verticalCenter
-              text: root.glassOn ? "click to lift" : "click to lower"
+              text: (root.powerOn ? "click to switch off" : "click to switch on")
+                  + "  ·  super ctrl shift L"
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -402,7 +410,7 @@ Panel {
             MouseArea {
               anchors.fill: parent
               cursorShape: Qt.PointingHandCursor
-              onClicked: root.toggleGlass()
+              onClicked: root.togglePower()
             }
           }
 

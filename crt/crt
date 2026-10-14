@@ -4,7 +4,9 @@
     crt                        what every knob is set to right now
     crt set BARREL 0.7         turn a knob (repeat pairs for several)
     crt set SCAN 0.35 VIGN 0.2 service knobs take their raw shader names
-    crt on / crt off           lift the glass off the screen
+    crt off / crt on           switch the whole CRT off, or back on — watcher,
+    crt toggle                 tubes and glass, without uninstalling anything.
+                               SUPER + CTRL + SHIFT + L is `crt toggle`
 
     crt quiet on|off           stop the band on monitors without focus
     crt passthrough            surfaces handed back untouched (they draw
@@ -96,6 +98,10 @@ STAGED_COLORS = (
     / "omarchy/current/theme/colors.toml"
 )
 
+# L for gLass. SUPER+L, SUPER+CTRL+L and SUPER+SHIFT+L are Omarchy's own
+# (workspace layout, lock, screensaver); this one is free on a stock install.
+HOTKEY = "SUPER + CTRL + SHIFT + L"
+
 BEGIN = "-- >>> omarchy-crt (managed by `crt install`) >>>"
 END = "-- <<< omarchy-crt <<<"
 REQUIRE = 'require("hypr.crt")  -- omarchy-crt'
@@ -185,6 +191,8 @@ def load():
     st = {
         "panel": dict(PANEL_DEFAULTS),
         "service": {},
+        # The power switch for the whole CRT — see power(). Off is not a
+        # sheet of plain glass over a CRT that is still running.
         "on": True,
         # Off. See the clock note in render() — this is the one default whose
         # cost is a red banner across the user's desktop.
@@ -391,7 +399,12 @@ def render(st, path=None, validate=True):
         if not re.search(r"^\s*#define TUBE_COUNT\s+\d+", block, re.M):
             print(f"warning: ignoring {TUBES} — it defines no TUBE_COUNT",
                   file=sys.stderr)
-        elif not watcher_alive() and not os.environ.get("CRT_TUBES_ANYWAY"):
+        elif (not re.search(r"#define TUBE_COUNT\s+0\b", block)
+              and not watcher_alive() and not os.environ.get("CRT_TUBES_ANYWAY")):
+            # A block of zero rects is not a snapshot of anything — it is what
+            # `crt off` and a stopping watch leave behind — so it is spliced
+            # below without a word rather than warned about.
+            #
             # RECTS NOBODY IS KEEPING TRUE ARE WORSE THAN NO RECTS. Every
             # surface that appears after they were written — a tray, a menu, a
             # notification, the lock screen — has no rect of its own and is
@@ -655,6 +668,9 @@ def write_tubes(block):
 
 def tubes_once():
     st = load()
+    if not st["on"]:
+        print("the CRT is switched off — `crt on` first")
+        return
     block = td_tubes_block(st.get("passthrough", []), st.get("quietUnfocused", True))
     if block is None:
         die(f"geometry missing at {GEOMETRY} — run bin/sync-tubes-geometry (glass stays flat)")
@@ -669,6 +685,13 @@ def tubes_once():
 
 def tubes_watch():
     """Follow the compositor and keep the rects true until interrupted."""
+    # SWITCHED OFF MEANS NOTHING RUNS. The unit is still enabled, so login
+    # starts this whether or not the CRT is on; exiting 0 here is what keeps
+    # it from binding anything, and Restart=on-failure leaves a clean exit be.
+    if not load()["on"]:
+        print("crt: the CRT is switched off, so there is nothing to keep true "
+              "— `crt on` starts it", flush=True)
+        return
     if td_tubes_block() is None:
         die(f"geometry missing at {GEOMETRY} — run bin/sync-tubes-geometry")
 
@@ -729,6 +752,10 @@ def tubes_watch():
         n = re.search(r"#define TUBE_COUNT\s+(\d+)", block)
         print(f"crt: {n.group(1) if n else '?'} tube(s)  <- {why}", flush=True)
 
+    # At login both watchers start together, and only one of them may own the
+    # screen shader. Parked before the first build, so td-tubes' own exit (it
+    # points the shader at its passthrough on the way down) lands first.
+    park_td_tubes()
     print(f"crt: watching {sock_path} (ctrl-c to stop)", flush=True)
     build("start", validate=True)
 
@@ -972,6 +999,141 @@ def commit(st):
     """
     apply(st)
     save(st)
+
+
+# ---------------------------------------------------------------------- power
+#
+# OFF IS THE WHOLE CRT, NOT A SHEET OF PLAIN GLASS OVER A RUNNING ONE.
+#
+# This replaced a "lift", which pointed the screen shader at the passthrough and
+# left everything else running, and on 2026-10-14 that looked like a desktop
+# whose tiles could not decide whether they were warped. Three things were still
+# binding a shader while the glass was "off":
+#
+#   - this plugin's own watch, rebuilding on every focus change;
+#   - td-tubes, the terminal-delight theme's watcher, which a theme-set hook had
+#     started that morning and which binds the theme's glass on every layout
+#     event — hovering from tile to tile flipped the screen between the two;
+#   - crt.lua, which bound the full glass again on every config reload.
+#
+# So off stops both watchers, binds the passthrough, hands damage tracking and
+# the cursor back to Hyprland's defaults, and crt.lua reads the switch before it
+# binds anything. On is the same list in reverse. Nothing is uninstalled either
+# way: the unit stays enabled and refuses to start while the switch says off.
+
+
+def park_td_tubes():
+    """Stop the theme's watcher if it is running. True if it was.
+
+    td-tubes and this plugin's watch do the same job, and two owners of
+    decoration:screen_shader do not error — they take turns, which is flicker.
+    `crt install` refuses to wire in over it; this is the same judgement made
+    at the moment someone has asked for the CRT to be in a definite state.
+    """
+    if not shutil.which("systemctl"):
+        return False
+    r = subprocess.run(["systemctl", "--user", "is-active", "td-tubes.service"],
+                       capture_output=True, text=True)
+    if r.stdout.strip() != "active":
+        return False
+    subprocess.run(["systemctl", "--user", "stop", "td-tubes.service"],
+                   capture_output=True)
+    print("crt: stopped td-tubes.service — the terminal-delight theme's own "
+          "watcher, which binds its glass over this one on every layout event",
+          flush=True)
+    return True
+
+
+def is_crt_watch(pid):
+    """Is `pid` a `crt tubes watch`, by its own command line?
+
+    A pid file can outlive its process and the number can be handed to
+    something else, so a pid is only signalled once /proc says what it is.
+    Unreadable is not yes.
+    """
+    try:
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    args = [a.decode("utf-8", "replace") for a in argv if a]
+    return (any(a == "crt" or a.endswith("/crt") for a in args)
+            and args[-2:] == ["tubes", "watch"])
+
+
+def stop_watcher():
+    if shutil.which("systemctl"):
+        subprocess.run(["systemctl", "--user", "stop", "crt-tubes.service"],
+                       capture_output=True)
+    # A watch started by hand is not systemd's to stop.
+    try:
+        pid = int(WATCHER_PID.read_text().strip())
+    except (OSError, ValueError):
+        return
+    if pid == os.getpid() or not is_crt_watch(pid):
+        WATCHER_PID.unlink(missing_ok=True)      # stale: nobody to stop
+        return
+    import signal
+    import time as _time
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        WATCHER_PID.unlink(missing_ok=True)
+        return
+    # It flattens on the way out; give it the moment that takes.
+    for _ in range(40):
+        if not is_crt_watch(pid):
+            break
+        _time.sleep(0.05)
+
+
+def start_watcher():
+    if shutil.which("systemctl") and UNIT.is_file():
+        subprocess.run(["systemctl", "--user", "start", "crt-tubes.service"],
+                       capture_output=True)
+    elif not watcher_alive():
+        print("  no watcher unit is installed, so the tiles stay flat until "
+              "`crt tubes watch`")
+
+
+def refresh_crt_lua():
+    """Bring an older crt.lua up to the switch, if it is ours.
+
+    One written before the switch existed binds the full glass at every reload
+    whatever the switch says — the third of the three owners above — and has no
+    hotkey. The paths it names cannot have moved, so rewriting it is safe; it
+    is only ever done to a file that carries our marker.
+    """
+    if not CRT_LUA.is_file() or CRT_LUA.is_symlink():
+        return
+    try:
+        text = CRT_LUA.read_text()
+    except OSError:
+        return
+    want = crt_lua_text()
+    if text != want and is_ours(CRT_LUA, text):
+        claim(CRT_LUA, want)
+
+
+def power(on):
+    st = load()
+    st["on"] = on
+    # Saved FIRST, which is the one place this departs from commit()'s
+    # render-then-save. The watch reads the switch on its way out (its flatten
+    # applies whatever state says) and on its way in (it will not start while
+    # the switch is off), so both have to see the new value before either is
+    # asked to move. A bool cannot fail to compile, which is the only thing
+    # the other order protects against.
+    save(st)
+    refresh_crt_lua()
+    park_td_tubes()
+    if on:
+        # Flat glass now, the tubes as soon as the watch's first build lands.
+        apply(st)
+        start_watcher()
+    else:
+        stop_watcher()
+        write_tubes("#define TUBE_COUNT 0\n")
+        apply(st)
 
 
 # Last damage/cursor tier actually pushed to Hyprland, so an unchanged rebuild
@@ -1498,17 +1660,41 @@ def crt_lua_text():
 -- for the banner at all. Tiers: the clock costs 0 (Hyprland insists, in red),
 -- a still glass with tubes costs 1 (a damaged frame is repainted whole, so the
 -- gather never samples a stale neighbour), bare glass costs nothing.
-local frag = "{SHADER}"
-local probe = io.open(frag, "r")
-if probe then
-  local src = probe:read("*a")
-  probe:close()
-  local tier = 2
-  if (tonumber(src:match("#define TUBE_COUNT%s+(%d+)")) or 0) > 0 then tier = 1 end
-  if src:match("#define ANIMATED%s+1") then tier = 0 end
-  hl.config({{ debug = {{ damage_tracking = tier }} }})
-  hl.config({{ decoration = {{ screen_shader = frag }} }})
+--
+-- AND THE POWER SWITCH IS READ FIRST. `crt off` switches the whole CRT off, and
+-- a reload binding the glass straight back would undo it on the next theme
+-- switch. While knobs.json says off this binds the plain passthrough instead,
+-- and asks for no damage tier, which leaves Hyprland's own.
+local off = false
+local knobs = io.open("{KNOBS}", "r")
+if knobs then
+  off = knobs:read("*a"):match('"on"%s*:%s*false') ~= nil
+  knobs:close()
 end
+local frag = "{SHADER}"
+if off then
+  local plain = io.open("{PASSTHROUGH}", "r")
+  if plain then
+    plain:close()
+    hl.config({{ decoration = {{ screen_shader = "{PASSTHROUGH}" }} }})
+  end
+else
+  local probe = io.open(frag, "r")
+  if probe then
+    local src = probe:read("*a")
+    probe:close()
+    local tier = 2
+    if (tonumber(src:match("#define TUBE_COUNT%s+(%d+)")) or 0) > 0 then tier = 1 end
+    if src:match("#define ANIMATED%s+1") then tier = 0 end
+    hl.config({{ debug = {{ damage_tracking = tier }} }})
+    hl.config({{ decoration = {{ screen_shader = frag }} }})
+  end
+end
+
+-- {HOTKEY} switches the whole CRT off and on. It runs through the guard like
+-- every other registration, so once the plugin is gone the key does nothing.
+hl.bind("{HOTKEY}", hl.dsp.exec_cmd("{shlex.quote(str(GUARD))} run toggle"),
+        {{ description = "Switch the CRT on or off" }})
 {END}
 """
 
@@ -1642,7 +1828,7 @@ def uninstall():
 
 def show(st):
     ch = theme_colours()
-    print(f"  {'GLASS':<10} {'on' if st['on'] else 'off'}")
+    print(f"  {'POWER':<10} {'on' if st['on'] else 'off'}   ({HOTKEY}, or `crt toggle`)")
     print(f"  {'CLOCK':<10} {'running' if st.get('animated') else 'stopped'}"
           f"{'   (Hyprland redraws the whole screen every frame)' if st.get('animated') else ''}")
     # Every front-panel dial, taken from PANEL_DEFAULTS rather than listed
@@ -1806,14 +1992,14 @@ def main(argv):
         commit(st)
         show(st)
         return
-    if cmd in ("on", "off"):
-        st["on"] = cmd == "on"
-        commit(st)
-        print("glass on" if st["on"] else "glass lifted")
+    if cmd in ("on", "off", "toggle"):
+        on = (not st["on"]) if cmd == "toggle" else cmd == "on"
+        power(on)
+        print("CRT on" if on else "CRT off")
         return
 
     die(f"unknown command '{cmd}' — "
-        "crt [list|set|on|off|doctor|try|untry|install|uninstall|render]")
+        "crt [list|set|on|off|toggle|doctor|try|untry|install|uninstall|render]")
 
 
 if __name__ == "__main__":
