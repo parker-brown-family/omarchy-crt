@@ -33,6 +33,25 @@ jobs:
       - name: run the tests
         run: ./test/run
 
+      # A tile resize posts no Hyprland event, so the watch polls the rects.
+      # The probe drives the real watcher over fake sockets that stay silent.
+      - name: a silent resize moves the tube
+        run: ./test/probe-silent-resize
+
+      # And it must go red with the poll switched off, or it proves nothing.
+      - name: prove the resize probe catches a dead poll
+        run: |
+          d="$(mktemp -d)"
+          cp crt/tubes-geometry crt/crt-glass.frag "$d/"
+          sed 's/^    RECT_POLL = 0\.10$/    RECT_POLL = 3600/' crt/crt >"$d/crt"
+          chmod +x "$d/crt"
+          grep -q '^    RECT_POLL = 3600$' "$d/crt" || { echo "mutation did not apply" >&2; exit 1; }
+          if ./test/probe-silent-resize "$d/crt" >/dev/null 2>&1; then
+            echo "SENTINEL FAILED: the probe passed with the rect poll disabled" >&2
+            exit 1
+          fi
+          echo "sentinel ok: a disabled rect poll turns the probe red"
+
       # bin/sync-tubes-geometry is Python, not shell, and shellcheck refuses
       # it outright (SC1071) rather than skipping it.
       - name: shellcheck the scripts

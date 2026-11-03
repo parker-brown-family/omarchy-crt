@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""A tile resized with no event must still move its tube. SANDBOXED probe.
+
+    test/probe-silent-resize            the watcher in this tree
+    test/probe-silent-resize <crt>      any other build of it (e.g. HEAD's)
+
+THE BUG. Hyprland 0.56.2 posts nothing on socket2 when a tile changes size:
+not for the SUPER+-/= keys, not for a SUPER+right-drag, not for a script's
+resizewindowpixel. The watch only rebuilt on events, so a resized tile kept
+its old rect and the warp sat at the tile's old size until something
+unrelated (a focus change, a new window) happened along. Photographed
+2026-11-02: three tiles, the middle one shrunk, its bezel still the old width.
+
+THE TEST. Two fake Hyprland sockets in a sandbox XDG_RUNTIME_DIR — an event
+socket that never says a word, which is exactly what a resize sounds like, and
+a request socket answering `j/clients` from a fixture — plus a stub hyprctl
+reading the same fixture for the geometry. The real watcher runs against them.
+After it settles, the fixture's tile is made narrower and NOTHING is sent on
+the event socket. Pass when the baked tube block picks up the new width within
+a second. It never touches the live compositor.
+
+Run against HEAD's crt from before the fix, it must FAIL — that is how this
+check was proven able to fail, and why it takes a path:
+
+    git show <before>:crt/crt > /tmp/crt-old && chmod +x /tmp/crt-old
+    cp -r crt/tubes-geometry crt/crt-glass.frag /tmp/   # plugin files beside it
+    test/probe-silent-resize /tmp/crt-old
+"""
+import json
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+CRT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else REPO / "crt" / "crt"
+
+SB = Path(tempfile.mkdtemp(prefix="crt-resize-"))
+HOME = SB / "home"
+RUN = SB / "run"
+SIG = "probe_sig"
+HYPR = RUN / "hypr" / SIG
+FIX = SB / "clients.json"
+
+for d in (HOME / ".config/hypr", HOME / ".local/state/omarchy/current/theme",
+          HYPR, SB / "bin"):
+    d.mkdir(parents=True, exist_ok=True)
+
+(HOME / ".local/state/omarchy/current/theme/colors.toml").write_text(
+    'mode = "dark"\naccent = "#7aa2f7"\nbright_foreground = "#c0caf5"\n'
+    'foreground = "#a9b1d6"\nbackground = "#1a1b26"\n')
+
+MON = [{"id": 0, "name": "PROBE-1", "x": 0, "y": 0, "width": 1920, "height": 1080,
+        "scale": 1.0, "transform": 0, "focused": True,
+        "activeWorkspace": {"id": 1, "name": "1"},
+        "specialWorkspace": {"id": 0, "name": ""}}]
+
+
+def client(addr, x, w):
+    return {"address": addr, "mapped": True, "hidden": False, "visible": True,
+            "at": [x, 40], "size": [w, 1000], "workspace": {"id": 1, "name": "1"},
+            "floating": False, "monitor": 0, "class": "probe", "title": "probe",
+            "fullscreen": 0, "focusHistoryID": 0 if addr == "0xa" else 1,
+            "grouped": [], "pinned": False}
+
+
+def layout(left_w):
+    FIX.write_text(json.dumps([client("0xa", 10, left_w),
+                               client("0xb", 20 + left_w, 1890 - left_w)]))
+
+
+layout(940)
+(SB / "monitors.json").write_text(json.dumps(MON))
+
+stub = SB / "bin/hyprctl"
+stub.write_text(f"""#!/usr/bin/env bash
+case "$1" in
+  monitors) cat "{SB}/monitors.json" ;;
+  clients)  cat "{FIX}" ;;
+  layers)   echo '{{}}' ;;
+  configerrors) echo "no errors" ;;
+  getoption) echo "int: 2"; echo "set: true" ;;
+esac
+exit 0
+""")
+stub.chmod(0o755)
+sysctl = SB / "bin/systemctl"
+sysctl.write_text("#!/usr/bin/env bash\n[[ \"$*\" == *is-active* ]] && echo inactive\nexit 0\n")
+sysctl.chmod(0o755)
+
+
+def serve(path, handler):
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(path))
+    srv.listen(8)
+
+    def loop():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=handler, args=(conn,), daemon=True).start()
+    threading.Thread(target=loop, daemon=True).start()
+    return srv
+
+
+def silent(conn):          # socket2: holds the line open and says nothing
+    while conn.recv(4096):
+        pass
+
+
+def request(conn):         # .socket.sock: one request, one answer, close
+    q = conn.recv(4096)
+    if q.endswith(b"clients"):
+        conn.sendall(FIX.read_bytes())
+    elif q.endswith(b"monitors"):
+        conn.sendall(json.dumps(MON).encode())
+    conn.close()
+
+
+servers = [serve(HYPR / ".socket2.sock", silent), serve(HYPR / ".socket.sock", request)]
+
+env = dict(os.environ, HOME=str(HOME), XDG_RUNTIME_DIR=str(RUN),
+           HYPRLAND_INSTANCE_SIGNATURE=SIG,
+           XDG_CONFIG_HOME=str(HOME / ".config"),
+           XDG_STATE_HOME=str(HOME / ".local/state"),
+           XDG_DATA_HOME=str(HOME / ".local/share"),
+           XDG_CACHE_HOME=str(HOME / ".cache"),
+           PATH=f"{SB / 'bin'}:{os.environ['PATH']}")
+TUBES = HOME / ".local/state/omarchy/crt/tubes.glsl"
+
+
+def wait_for(pred, secs):
+    end = time.monotonic() + secs
+    while time.monotonic() < end:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def tubes():
+    try:
+        return TUBES.read_text()
+    except OSError:
+        return ""
+
+
+def rects():
+    """The rect lines alone — the part a resize has to change."""
+    return [ln for ln in tubes().splitlines() if ln.lstrip().startswith("vec4(")]
+
+
+status = 1
+proc = subprocess.Popen([str(CRT), "tubes", "watch"], env=env,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+out = []
+threading.Thread(target=lambda: out.extend(proc.stdout), daemon=True).start()
+try:
+    # Synchronise on the startup build having FINISHED (its line prints after
+    # the apply), not on the file appearing: the file is written before a
+    # sandbox apply that can take most of a second.
+    if not wait_for(lambda: any("<- start" in ln for ln in out), 15) or "TUBE_COUNT 2" not in tubes():
+        print(f"  FAIL the watcher never baked the two starting tiles\n{tubes()!r}")
+    else:
+        before = rects()
+        layout(600)            # the resize — and not one byte on socket2
+        t0 = time.monotonic()
+        moved = wait_for(lambda: rects() and rects() != before, 1.5)
+        dt = (time.monotonic() - t0) * 1000
+        if moved:
+            print(f"  ok   a silent resize moved the tube rects in {dt:.0f} ms "
+                  "(sandbox: stub hyprctl, slower than a live desk)")
+            status = 0
+        else:
+            print("  FAIL a tile resized with no event; the tube rects kept the old size")
+        if os.environ.get("CRT_PROBE_VERBOSE"):
+            print("before:", *before, "after:", *rects(), sep="\n  ")
+finally:
+    proc.send_signal(signal.SIGTERM)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    if os.environ.get("CRT_PROBE_VERBOSE"):
+        print("".join(out))
+    for s in servers:
+        s.close()
+    shutil.rmtree(SB, ignore_errors=True)
+sys.exit(status)

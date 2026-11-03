@@ -756,8 +756,42 @@ def tubes_watch():
     # screen shader. Parked before the first build, so td-tubes' own exit (it
     # points the shader at its passthrough on the way down) lands first.
     park_td_tubes()
+
+    # A RESIZE IS SILENT. Hyprland 0.56.2 posts no socket2 event when a tile
+    # changes size — not for the SUPER+-/= keys (resizeactive), not for a
+    # SUPER+right-drag, not for a script's resizewindowpixel — and its Lua
+    # config has no window-resize hook either (checked against the v0.56.2
+    # source: the event list stops at open/close/move/fullscreen/workspace).
+    # Without this the tube kept the old rect until some unrelated event
+    # happened along, so the warp sat at the tile's old size. So the idle loop
+    # also asks the request socket for the clients every RECT_POLL and treats a
+    # changed rect like an event. One query is ~0.13 ms; the snapshot it can
+    # trigger only runs when something actually moved.
+    req_path = sock_path.with_name(".socket.sock")
+    RECT_POLL = 0.10
+
+    def rects():
+        """Every client's place and size, or None when the socket did not answer
+        — None is "could not look", never "no windows", so it changes nothing."""
+        try:
+            q = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            q.settimeout(0.5)
+            q.connect(str(req_path))
+            q.sendall(b"j/clients")
+            raw = b""
+            while chunk := q.recv(65536):
+                raw += chunk
+            q.close()
+            return tuple(sorted(
+                (c.get("address"), tuple(c.get("at") or ()), tuple(c.get("size") or ()))
+                for c in json.loads(raw)))
+        except (OSError, ValueError, TypeError, AttributeError):
+            return None
+
     print(f"crt: watching {sock_path} (ctrl-c to stop)", flush=True)
+    seen_rects = rects()
     build("start", validate=True)
+    next_poll = _time.monotonic() + RECT_POLL
 
     s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
     s.connect(str(sock_path))
@@ -773,12 +807,13 @@ def tubes_watch():
     first_pending = None
     deadline = None
     banner_pending = False
+    why = "burst"
     try:
         while True:
             now = _time.monotonic()
-            timeout = None
+            timeout = max(0.0, next_poll - now)
             if dirty and deadline is not None:
-                timeout = max(0.0, deadline - now)
+                timeout = max(0.0, min(timeout, deadline - now))
             ready, _, _ = _select.select([s], [], [], timeout)
             now = _time.monotonic()
 
@@ -815,17 +850,36 @@ def tubes_watch():
                         # recover on its own.
                         banner_pending = True
                     if name in WATCH_EVENTS:
-                        dirty = True
+                        dirty, why = True, "burst"
                         if first_pending is None:
                             first_pending = now
                         deadline = now + DEBOUNCE   # slide the quiet-gap window
+
+            # The silent resize (see RECT_POLL). The poll interval is already the
+            # debounce, so a changed rect rebuilds now rather than sliding the
+            # window: holding SUPER+= repeats faster than DEBOUNCE, and a sliding
+            # gap would hold the warp still until COALESCE_MAX every time. A burst
+            # already pending keeps its own debounce — its build snapshots the new
+            # rects anyway, and cutting it short would split one open into two.
+            if now >= next_poll:
+                next_poll = now + RECT_POLL
+                r = rects()
+                if r is not None and r != seen_rects:
+                    seen_rects = r
+                    if not dirty:
+                        dirty, first_pending, deadline = True, now, now
+                        why = "resize"
 
             # The burst has settled (quiet for DEBOUNCE) or has run long enough
             # (COALESCE_MAX): rebuild once with everything collected.
             if dirty and deadline is not None and (
                     now >= deadline or now - first_pending >= COALESCE_MAX):
                 dirty, first_pending, deadline = False, None, None
-                build("burst")
+                # The build snapshots the layout as it is now, so the poll's
+                # baseline moves with it — else the next poll re-reports what an
+                # event-driven build already drew.
+                seen_rects = rects() or seen_rects
+                build(why)
                 if banner_pending:
                     banner_pending = False
                     # Close the banner the reload raised — but only when the
