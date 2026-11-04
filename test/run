@@ -1061,6 +1061,9 @@ check "the tube watch stands down" \
   "$(nat tubes watch 2>&1 | grep -c 'native pass owns the glass')" "1"
 check "another session's flag means nothing" \
   "$(XDG_RUNTIME_DIR="$RUNDIR" HYPRLAND_INSTANCE_SIGNATURE=a-new-login "$CRT" native status)" "native pass: off"
+check "a shell with no session cannot say, so it does not say off" \
+  "$(env -u HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR="$RUNDIR" "$CRT" native status)" \
+  "native pass: unknown (no Hyprland session in this shell)"
 
 if [[ -n "$LUA_BIN" ]]; then
   check "a reload in this session binds no shader over the pass" \

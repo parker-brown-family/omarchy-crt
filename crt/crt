@@ -2283,7 +2283,11 @@ def main(argv):
         elif sub == "off":
             native_off()
         elif sub == "status":
-            print("native pass: " + ("on" if native_active() else "off"))
+            # No signature means this shell cannot see a session, which is not "off".
+            if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+                print("native pass: unknown (no Hyprland session in this shell)")
+            else:
+                print("native pass: " + ("on" if native_active() else "off"))
         else:
             die("native [on|off|status]")
         return
