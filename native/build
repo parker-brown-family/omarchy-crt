@@ -6,6 +6,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 state="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/crt/native"
 out="${1:-$state/crt-pass.so}"; shift || true
 mkdir -p "$(dirname "$out")"
+# shellcheck disable=SC2046  # pkg-config prints several flags
 g++ -shared -fPIC -std=c++2b -O2 -Wno-c++11-narrowing -Wno-deprecated-declarations "${CRT_PASS_SOURCE:-$here/crt-pass.cpp}" -o "$out" \
   $(pkg-config --cflags hyprland pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon) -lGLESv2 -ldl "$@"
 echo "built $out"

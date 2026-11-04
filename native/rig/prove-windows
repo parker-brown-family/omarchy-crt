@@ -102,9 +102,9 @@ dispatch("hl.dsp.focus({ window = 'title:^grid$' })"); time.sleep(.5)
 parity("float-behind-focus")
 spawn(["foot", "--app-id=terminal-delight", "--title=td", "sleep", "300"]); settle(4)
 parity("terminal-delight-tile")
-# Today's picture is wrong here: a float behind the fullscreen window punches a bent
-# hole in it. So the reference is the same fullscreen window with nothing behind it.
+# A float behind a fullscreen window must change nothing, on either path.
 fullscreen(True)
+parity("fullscreen-float-behind")
 _, _, fs_full = grab("fullscreen-float-behind")
 mean, worst, big = compare(fs_clean, fs_full, w, h)
 verdict(mean < 0.1 and big < 0.1, f"a float hidden behind fullscreen changes nothing: mean {mean:.3f}/255, {big:.3f}% off")

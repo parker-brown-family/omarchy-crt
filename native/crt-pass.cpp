@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <unistd.h>
 #include <cstdlib>
+#include "source.hpp"
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
@@ -70,16 +71,10 @@ void main() {
 // a layout change is a uniform write, never a compile.
 static constexpr int MAX_TUBES = 24;
 
-struct SKnob {
-    std::string name;
-    float       value[3] = {0, 0, 0};
-    int         size     = 1;
-    GLint       loc      = -1;
-};
 static std::vector<SKnob>       g_knobs;
 static std::vector<std::string> g_passthrough;     // window classes that keep their own picture
-static bool               g_animated = false;
-static bool               g_on       = true;
+static bool                     g_animated = false;
+static bool                     g_on       = true;
 
 static std::string pluginDir() {
     Dl_info i{};
@@ -90,41 +85,7 @@ static std::string pluginDir() {
 
 static std::string nativeSource() {
     std::ifstream f(pluginDir() + "/crt-glass.frag");
-    if (!f)
-        return {};
-    static const std::regex knob(R"(^const float (\w+)\s*=\s*(-?[0-9.]+);.*)");
-    static const std::regex derived(R"(^const float (\w+)\s*=\s*([^;]+);.*)");
-    static const std::regex colour(R"(^const vec3\s+(\w+)\s*=\s*vec3\(([^,]+),([^,]+),([^)]+)\);.*)");
-    std::string out, line;
-    std::smatch m;
-    bool        inTubes = false;
-    g_knobs.clear();
-    while (std::getline(f, line)) {
-        if (line.starts_with("// ---- TUBE DATA")) {
-            inTubes = true;
-            out += "#define TUBE_COUNT " + std::to_string(MAX_TUBES) + "\n"
-                   "uniform vec4  TUBE_RECT[TUBE_COUNT];\nuniform int   TUBE_MON[TUBE_COUNT];\n"
-                   "uniform float TUBE_CURV[TUBE_COUNT];\nuniform int   TUBE_PASS[TUBE_COUNT];\n"
-                   "uniform int   TUBE_QUIET[TUBE_COUNT];\n";
-        } else if (line.starts_with("// ---- END TUBE DATA")) {
-            inTubes = false;
-        } else if (inTubes) {
-            continue;
-        } else if (line.starts_with("#define ANIMATED")) {
-            out += "#define ANIMATED 1\n";          // the clock is a uniform too; 0 stands still
-        } else if (std::regex_match(line, m, knob)) {
-            g_knobs.push_back({.name = m[1], .value = {std::stof(m[2])}, .size = 1});
-            out += "uniform float " + m[1].str() + ";\n";
-        } else if (std::regex_match(line, m, derived)) {
-            out += "#define " + m[1].str() + " (" + m[2].str() + ")\n";
-        } else if (std::regex_match(line, m, colour)) {
-            g_knobs.push_back({.name = m[1], .value = {std::stof(m[2]), std::stof(m[3]), std::stof(m[4])}, .size = 3});
-            out += "uniform vec3 " + m[1].str() + ";\n";
-        } else {
-            out += line + "\n";
-        }
-    }
-    return out;
+    return f ? nativeFrom(f, g_knobs, MAX_TUBES) : std::string{};
 }
 
 static float knob(const char* name, float fallback) {
@@ -386,7 +347,9 @@ static std::vector<STube> tubes(PHLMONITOR m) {
         if (w->m_workspace && !w->m_pinned && w->m_workspace->m_renderOffset->isBeingAnimated())
             logical.translate(w->m_workspace->m_renderOffset->value());
         logical.translate(w->m_floatingOffset);
-        if (w->m_isFloating && !Fullscreen::controller()->isFullscreen(w) && w->m_ruleApplicator->decorate().valueOrDefault())
+        // The border goes inside the glass. Left outside, the tube's black corner eats
+        // the rounded arc and leaves a square block with stubs of border around it.
+        if (!Fullscreen::controller()->isFullscreen(w) && w->m_ruleApplicator->decorate().valueOrDefault())
             logical.expand(w->getRealBorderSize());
         // The framebuffer is in the panel's own orientation, not the rotated one a
         // person sees. Only the rect turns: the warp is symmetric in x and y.

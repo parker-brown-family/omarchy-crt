@@ -56,6 +56,7 @@ export HYPRCTL_LOG="$SANDBOX/hyprctl.log"
 export SHADER_STATE="$SANDBOX/screen_shader"
 export TD_TUBES_STATE="$SANDBOX/td-tubes-active"
 export DAMAGE_STATE="$SANDBOX/damage_tracking"
+export PLUGIN_REFUSE="$SANDBOX/plugin-refuse"
 export SYSTEMCTL_LOG="$SANDBOX/systemctl.log"
 : >"$SHADER_STATE"
 echo inactive >"$TD_TUBES_STATE"
@@ -66,6 +67,8 @@ cat >"$SANDBOX/bin/hyprctl" <<'STUB'
 echo "$*" >>"$HYPRCTL_LOG"
 case "$1" in
   configerrors) echo "no errors" ;;
+  plugin)
+    if [[ "$2" == load && -f "$PLUGIN_REFUSE" ]]; then echo "Plugin could not be loaded"; else echo ok; fi ;;
   getoption)
     if [[ "$2" == "debug:damage_tracking" ]]; then echo "int: $(cat "$DAMAGE_STATE")"
     else echo "str: $(cat "$SHADER_STATE")"; echo "set: true"; fi ;;
@@ -1017,6 +1020,80 @@ check "crt.lua binds the switch with and without ALT" \
 check "the button is a real file beside the panel" "$(test -f "$REPO/PowerButton.qml" && echo yes)" "yes"
 check "and pulls no shell module in, so it can be drawn alone" \
   "$(grep -c '^import q[s]' "$REPO/PowerButton.qml")" "0"
+
+echo
+echo "the native pass: crt owns the choice, and nothing is left stranded"
+# ---------------------------------------------------------------------------
+# CI has no compositor, so this is the owner logic against the stub, and the shader
+# translation against a real GLSL validator. The pass itself is proved on a GPU by
+# native/rig/matrix.
+# ---------------------------------------------------------------------------
+RUNDIR="$SANDBOX/run"; mkdir -p "$RUNDIR"
+NATDIR="$XDG_STATE_HOME/omarchy/crt/native"
+FLAG="$RUNDIR/omarchy-crt-native"
+nat() { XDG_RUNTIME_DIR="$RUNDIR" HYPRLAND_INSTANCE_SIGNATURE=this-session "$CRT" "$@"; }
+rm -rf "$NATDIR"; mkdir -p "$NATDIR"
+"$CRT" install >/dev/null 2>&1
+"$CRT" on >/dev/null 2>&1
+
+nat native on >/dev/null 2>&1
+check "native on with nothing built refuses" "$?" "1"
+
+echo built >"$NATDIR/crt-pass.so"
+: >"$HYPRCTL_LOG"
+nat native on >/dev/null 2>&1
+check "native on loads the plugin" "$?" "0"
+check "under a name of its own, so a rebuild needs no restart" \
+  "$(grep -cE '^plugin load .*/crt-pass-[0-9a-f]{12}\.so$' "$HYPRCTL_LOG")" "1"
+check "the flag names this session" "$(head -1 "$FLAG")" "this-session"
+check "no screen shader is left bound over it" "$(cat "$SHADER_STATE")" ""
+check "and it asks for whole-monitor repaints" "$(cat "$DAMAGE_STATE")" "1"
+
+: >"$HYPRCTL_LOG"
+nat set BARREL 0.2 >/dev/null 2>&1
+check "crt set reaches knobs.txt" "$(awk '$1=="TUBE_K1"{print $2}' "$NATDIR/knobs.txt")" "0.052"
+check "and binds no shader" "$(grep -c 'crt-glass' "$HYPRCTL_LOG")" "0"
+nat off >/dev/null 2>&1
+check "crt off reaches the pass" "$(awk '$1=="ON"{print $2}' "$NATDIR/knobs.txt")" "0"
+nat on >/dev/null 2>&1
+check "and crt on" "$(awk '$1=="ON"{print $2}' "$NATDIR/knobs.txt")" "1"
+check "the tube watch stands down" \
+  "$(nat tubes watch 2>&1 | grep -c 'native pass owns the glass')" "1"
+check "another session's flag means nothing" \
+  "$(XDG_RUNTIME_DIR="$RUNDIR" HYPRLAND_INSTANCE_SIGNATURE=a-new-login "$CRT" native status)" "native pass: off"
+
+if [[ -n "$LUA_BIN" ]]; then
+  check "a reload in this session binds no shader over the pass" \
+    "$(XDG_RUNTIME_DIR="$RUNDIR" HYPRLAND_INSTANCE_SIGNATURE=this-session CRT_LUA="$LUAF_" "$LUA_BIN" "$SANDBOX/power.lua" | grep -c 'shader=')" "0"
+  check "a reload after a crash binds it as usual" \
+    "$(XDG_RUNTIME_DIR="$RUNDIR" HYPRLAND_INSTANCE_SIGNATURE=a-new-login CRT_LUA="$LUAF_" "$LUA_BIN" "$SANDBOX/power.lua" | grep -c 'shader=crt-glass.frag')" "1"
+fi
+
+: >"$HYPRCTL_LOG"
+nat native off >/dev/null 2>&1
+check "native off unloads the build that was loaded" \
+  "$(grep -cE '^plugin unload .*/crt-pass-[0-9a-f]{12}\.so$' "$HYPRCTL_LOG")" "1"
+check "and clears the flag" "$([[ -e $FLAG ]] && echo y || echo n)" "n"
+check "and the shader is back" "$(grep -c 'crt-glass' "$SHADER_STATE")" "1"
+
+touch "$PLUGIN_REFUSE"
+nat native on >/dev/null 2>&1
+check "a plugin Hyprland refuses fails the command" "$?" "1"
+check "and leaves no flag" "$([[ -e $FLAG ]] && echo y || echo n)" "n"
+check "and the shader stays" "$(grep -c 'crt-glass' "$SHADER_STATE")" "1"
+rm -f "$PLUGIN_REFUSE"
+
+if command -v g++ >/dev/null && command -v glslangValidator >/dev/null; then
+  g++ -std=c++2b -o "$SANDBOX/test-source" "$REPO/native/test-source.cpp"
+  "$SANDBOX/test-source" "$TEMPLATE" >"$SANDBOX/native.frag" 2>"$SANDBOX/native.knobs"
+  glslangValidator -S frag "$SANDBOX/native.frag" >/dev/null 2>&1
+  check "the shipped shader still translates to valid GLSL for the pass" "$?" "0"
+  check "with every knob a uniform" \
+    "$(grep -cE '^const float (TUBE_K1|SCAN|GLOW|TRACKING) ' "$SANDBOX/native.frag")" "0"
+  check "and the tube arrays uniform too" "$(grep -c '^uniform vec4  TUBE_RECT' "$SANDBOX/native.frag")" "1"
+else
+  echo "  note g++ or glslangValidator missing, so the shader translation went unchecked"
+fi
 
 echo
 echo "  $PASS passed, $FAIL failed"

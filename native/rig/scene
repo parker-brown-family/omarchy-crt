@@ -4,9 +4,10 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"; S="$1"
 "$here/build" "$S/home/crt-pass.so" -DCRT_RIG
 rm -rf "$S/home/client"; cp -r "$here/rig/client" "$S/home/"
-X=/home/parker/Work/onn-omarchy/vendor/Hyprland/protocols/wlr-virtual-pointer-unstable-v1.xml
+X="$here/rig/wlr-virtual-pointer-unstable-v1.xml"
 wayland-scanner client-header "$X" "$S/home/vp.h"
 wayland-scanner private-code "$X" "$S/home/vp.c"
+# shellcheck disable=SC2046  # pkg-config prints several flags
 gcc -O1 -I"$S/home" "$here/rig/vptr.c" "$S/home/vp.c" -o "$S/home/vptr" $(pkg-config --cflags --libs wayland-client)
 "$here/rig/up" "$S"
 cp "$here/../crt/crt-glass.frag" "$S/home/crt-glass.frag"

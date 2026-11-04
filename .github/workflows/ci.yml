@@ -72,7 +72,21 @@ jobs:
           fi
           echo "sentinel ok: a disabled rect poll turns the probe red"
 
+      # Same for the native pass, which CI cannot run: a broken owner must go red.
+      - name: prove the tests catch a broken native owner
+        run: |
+          cp crt/crt /tmp/crt.orig
+          sed -i 's/^        return bool(sig) and native_flag().*/        return False/' crt/crt
+          cmp -s crt/crt /tmp/crt.orig && { echo "mutation did not apply" >&2; exit 1; }
+          if ./test/run >/dev/null 2>&1; then
+            echo "SENTINEL FAILED: the suite passed with native_active always false" >&2
+            cp /tmp/crt.orig crt/crt
+            exit 1
+          fi
+          cp /tmp/crt.orig crt/crt
+          echo "sentinel ok: a broken native owner turns the suite red"
+
       # bin/sync-tubes-geometry is Python, not shell, and shellcheck refuses
       # it outright (SC1071) rather than skipping it.
       - name: shellcheck the scripts
-        run: shellcheck -S warning bin/shoot test/run
+        run: shellcheck -S warning bin/shoot test/run native/sandbox native/build native/rig/up native/rig/scene native/rig/matrix

@@ -201,6 +201,25 @@ try:
     frozen = over("hyprpicker")
     verdict(frozen != bare and "// hyprpicker" in frozen, "the screenshot freeze keeps its flat claim")
 
+    # A window hidden behind a fullscreen one claims no tube, or a float among them
+    # punches a bent hole through the picture. One allowed over fullscreen keeps it.
+    (SB / "monitors.json").write_text(json.dumps(desk))
+    (SB / "layers.json").write_text("{}")
+    full = client(1, 0, 0, 1920, 1080, cls="full"); full["fullscreen"] = 2
+    behind = client(2, 300, 200, 700, 420, cls="behind", floating=True)
+    over = client(3, 600, 300, 300, 200, cls="over", floating=True); over["allowedOverFullscreen"] = True
+    (SB / "clients.json").write_text(json.dumps([full, behind, over]))
+    classes = [r["class"] for r in crt.tube_rows()]
+    verdict("behind" not in classes and "full" in classes, f"a float behind fullscreen claims no tube: {classes}")
+    verdict("over" in classes, "and one allowed over fullscreen keeps its tube")
+
+    # A tile's border sits inside its tube, or the tube's black corner eats the rounded arc.
+    (SB / "clients.json").write_text(json.dumps([client(1, 10, 40, 900, 1000, cls="tile")]))
+    (SB / "props.json").write_text(json.dumps({"border_size": 2, "decorate": True}))
+    t = next(r for r in crt.tube_rows() if r["class"] == "tile")
+    verdict((t["x"], t["y"], t["w"], t["h"]) == (8, 38, 904, 1004), f"a tile claims its border: {t}")
+    (SB / "props.json").write_text(json.dumps({"border_size": 0, "decorate": True}))
+
     # A class is the one string here a program chooses, and it lands in shader
     # source. A newline would end the comment and put the rest into the code.
     (SB / "monitors.json").write_text(json.dumps([monitor(0, "A", 1920, 1080, focused=True)]))

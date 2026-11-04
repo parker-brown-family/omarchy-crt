@@ -669,13 +669,26 @@ def claimed_layers(layers):
             for mon, doc in layers.items()}
 
 
+def unhidden_clients(clients):
+    """Drop windows behind a fullscreen one. They stay mapped and listed, but nothing
+    draws them, and a float among them kept its tube and punched a bent hole through
+    the fullscreen picture."""
+    covered = {c["workspace"]["id"] for c in clients if c.get("fullscreen") == 2}
+    return [c for c in clients
+            if c.get("fullscreen") == 2 or c.get("allowedOverFullscreen")
+            or c.get("workspace", {}).get("id") not in covered]
+
+
 def framed_clients(clients):
-    """Include a float's compositor border before scaling/rotating its rect.
-    Tiled frames stay unchanged: their neighbours already bound the tile map.
+    """Include a window's compositor border before scaling/rotating its rect.
+
+    Tiles too. Left outside the map, a rounded border's arc falls in the tube's black
+    corner, which reads as a square block with stubs of border around it (seen on a
+    tile at rounding 14, 2026-11-04).
     """
     framed = []
     for c in clients:
-        if not (c.get("floating") and c.get("mapped") and not c.get("hidden")) or c.get("fullscreen") == 2:
+        if not (c.get("mapped") and not c.get("hidden")) or c.get("fullscreen") == 2:
             framed.append(c)
             continue
         address = c["address"]
@@ -700,7 +713,7 @@ def tube_rows():
     mons, clients = hypr_query("monitors"), hypr_query("clients")
     if program is None or mons is None or clients is None or not shutil.which("jq"):
         return None
-    clients = framed_clients(clients)
+    clients = framed_clients(unhidden_clients(clients))
     if clients is None:
         return None
     layers = claimed_layers(hypr_query("layers"))
