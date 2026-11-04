@@ -85,8 +85,8 @@ file lives.
 ## Switching it off
 
 **SUPER + CTRL + SHIFT + L** switches the whole CRT off, and again switches it
-back on — L for gLass. So does the **POWER** row in the tray, a right-click on
-the bar icon, or:
+back on — L for gLass. So does the **power button** at the top of the tray, a
+right-click on the bar icon, or:
 
 ```bash
 crt toggle
@@ -158,6 +158,7 @@ when you start the clock and hands it back when you stop.
 |---|---|
 | `Panel.qml` | the bar icon and the tray |
 | `Knob.qml` | one dial — canvas face, angular drag, wheel |
+| `PowerButton.qml` | the switch at the top of the tray |
 | `crt/crt-glass.frag` | the template, never written to |
 | `crt/crt` | render, knobs, tubes, install |
 | `crt/crt-tubes.service` | the watcher that keeps the rects true |

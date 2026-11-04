@@ -88,7 +88,7 @@ Panel {
     (live && live.phosphor) ? live.phosphor : foreground
 
 
-  // The six service knobs that are natural 0..1 dials. The rest of the tube —
+  // The five service knobs that are natural 0..1 dials. The rest of the tube —
   // SCAN_STEP, BAND_H, TRACK_REST, the colour grade — has ranges a knob would
   // lie about, so those stay on the command line rather than being squeezed
   // onto a dial that reads 40% and means four pixels.
@@ -108,6 +108,17 @@ Panel {
   function constValue(key) {
     var v = consts[key]
     return (typeof v === "number") ? Math.max(0, Math.min(1, v)) : 0
+  }
+
+  // Which dials are holding the clock on, named because two of the three live
+  // behind the service flap: TRACKING at 0% with the note still showing reads as
+  // a broken dial otherwise.
+  readonly property var clockKnobs: {
+    var out = []
+    if (panelValue("TRACKING", 0) > 0) out.push("TRACKING")
+    if (constValue("FLICKER") > 0) out.push("FLICKER")
+    if (constValue("JIGGLE") > 0) out.push("JIGGLE")
+    return out
   }
 
   readonly property string heroMeta: {
@@ -250,8 +261,6 @@ Panel {
     function close(): void { root.close() }
     function toggle(): void { root.toggle() }
     function power(): void { root.togglePower() }
-    // The name this had when it lifted the glass; it now throws the switch.
-    function glass(): void { root.togglePower() }
   }
 
   // ------------------------------------------------------------- bar button
@@ -328,12 +337,46 @@ Panel {
           width: panelFlick.width
           spacing: Style.space(10)
 
-          PanelHero {
+          // The first thing in the tray, and the one control that matters when
+          // something is wrong with the picture. It sits beside the hero rather
+          // than in its trailingControl slot, because a Component in that slot
+          // resolves `root` to the hero and every line here needs this panel.
+          Item {
             width: parent.width
-            title: "Delight-O-Matic"
-            meta: root.heroMeta
-            foreground: root.foreground
-            fontFamily: root.fontFamily
+            height: Math.max(hero.implicitHeight, power.height)
+
+            PanelHero {
+              id: hero
+              anchors.left: parent.left
+              anchors.right: power.visible ? power.left : parent.right
+              anchors.rightMargin: power.visible ? Style.space(12) : 0
+              anchors.verticalCenter: parent.verticalCenter
+              title: "Delight-O-Matic"
+              meta: root.heroMeta
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            PowerButton {
+              id: power
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(116)
+              height: Style.space(50)
+              visible: root.installed
+              on: root.powerOn
+              tint: root.phosphor
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.togglePower()
+
+              PanelToolTip {
+                visible: power.containsMouse
+                text: (root.powerOn ? "Switch the CRT off" : "Switch the CRT on")
+                    + "  ·  super ctrl shift L"
+                fontFamily: root.fontFamily
+              }
+            }
           }
 
           PanelSeparator {
@@ -347,6 +390,7 @@ Panel {
             width: parent.width
             spacing: 0
             visible: root.installed
+            opacity: root.powerOn ? 1 : 0.4     // the dials still turn; the set is off
 
             Repeater {
               model: [
@@ -376,54 +420,18 @@ Panel {
             }
           }
 
-          // --------------------------------------------------------- power
-
-          Rectangle {
-            width: parent.width
-            height: Style.space(40)
-            radius: Style.space(6)
-            visible: root.installed
-            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
-
-            Text {
-              anchors.left: parent.left
-              anchors.leftMargin: Style.space(12)
-              anchors.verticalCenter: parent.verticalCenter
-              text: root.powerOn ? "POWER ON" : "POWER OFF"
-              color: root.powerOn ? root.phosphor : root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              font.letterSpacing: 1.2
-            }
-
-            Text {
-              anchors.right: parent.right
-              anchors.rightMargin: Style.space(12)
-              anchors.verticalCenter: parent.verticalCenter
-              text: (root.powerOn ? "click to switch off" : "click to switch on")
-                  + "  ·  super ctrl shift L"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-
-            MouseArea {
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: root.togglePower()
-            }
-          }
-
           // The one cost worth stating in the UI rather than in a README:
           // Hyprland turns damage tracking off for any shader that declares a
           // time uniform, so motion means the whole screen redraws every frame.
-          // TRACKING at zero is what turns the clock back off.
+          // Those dials at zero are what turn the clock back off.
           Text {
             width: parent.width
-            visible: root.installed && root.animated
+            visible: root.installed && root.animated && root.powerOn
             text: "The clock is running, so Hyprland redraws the whole screen every "
-                + "frame instead of just what changed. TRACKING, FLICKER and JIGGLE "
-                + "at zero stop it."
+                + "frame instead of just what changed. "
+                + (root.clockKnobs.length
+                   ? root.clockKnobs.join(" and ") + " at zero will stop it."
+                   : "TRACKING, FLICKER and JIGGLE at zero stop it.")
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
