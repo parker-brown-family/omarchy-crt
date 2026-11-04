@@ -52,7 +52,8 @@ const float TUBE_K2    = 0.06;  // gather pulls a tile's content inward, and the
                                 // it, so a click still lands — but your HAND travels to the
                                 // target's true position, up to ~4.25% of the tile away at a
                                 // corner (~40px on a 900px tile). Halve both to halve that.
-                                // test/probe-aim measures it on your own screen.
+                                // omarchy-terminal-delight-theme's test/probe-aim
+                                // measures it on your own screen.
 const float ABERR      = 0.55;  // chromatic split at the rim
 const float SCAN       = 0.22;  // scanline depth              (TD scanline_opacity)
 const float SCAN_STEP  = 4.0;   // px between scanlines        (TD scanline_step; 0 = legacy sin lines)

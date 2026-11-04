@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""The fast snapshot must bake exactly what the theme's geometry bakes. SANDBOXED.
+
+    test/probe-snapshot-parity
+
+THE RISK. crt/tubes-geometry is the theme's: rotation, scale, layers, occlusion,
+the budget. The watch no longer runs it through bash, because 13 processes per
+rebuild took ~240 ms; it lifts the one jq program out of that file and does the
+small jobs around it (the budget, the block text) itself. Those small jobs are
+therefore a second copy of `cap` and `emit_block`, and a second copy that drifts
+bends the desktop wrongly with nothing to say so.
+
+THE TEST. For each fixture, a stub hyprctl serves the same JSON to both paths,
+the real `emit_block "$(cap "$(tubes_json)")"` and the real td_tubes_block(), and
+the two blocks must match byte for byte once the two lines only this plugin adds
+are set aside. Those two lines are then checked on their own. It never touches
+the live compositor.
+"""
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+CRT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else REPO / "crt" / "crt"
+GEOMETRY = CRT.parent / "tubes-geometry"
+
+SB = Path(tempfile.mkdtemp(prefix="crt-parity-"))
+(SB / "bin").mkdir()
+stub = SB / "bin/hyprctl"
+stub.write_text(f"""#!/usr/bin/env bash
+case "$1" in
+  monitors) cat "{SB}/monitors.json" ;;
+  clients)  cat "{SB}/clients.json" ;;
+  layers)   cat "{SB}/layers.json" ;;
+esac
+""")
+stub.chmod(0o755)
+os.environ.update(PATH=f"{SB / 'bin'}:{os.environ['PATH']}", HOME=str(SB),
+                  XDG_STATE_HOME=str(SB / "state"))
+os.environ.pop("HYPRLAND_INSTANCE_SIGNATURE", None)    # the hyprctl path, on purpose
+
+loader = importlib.machinery.SourceFileLoader("crtmod", str(CRT))
+spec = importlib.util.spec_from_loader("crtmod", loader)
+crt = importlib.util.module_from_spec(spec)
+loader.exec_module(crt)
+
+
+def monitor(i, name, w, h, x=0, scale=1.0, transform=0, focused=False, ws=1):
+    return {"id": i, "name": name, "x": x, "y": 0, "width": w, "height": h, "scale": scale,
+            "transform": transform, "focused": focused,
+            "activeWorkspace": {"id": ws, "name": str(ws)},
+            "specialWorkspace": {"id": 0, "name": ""}}
+
+
+def client(n, x, y, w, h, mon=0, ws=1, cls="probe", floating=False):
+    return {"address": f"0x{n:x}", "mapped": True, "hidden": False, "visible": True,
+            "at": [x, y], "size": [w, h], "workspace": {"id": ws, "name": str(ws)},
+            "floating": floating, "monitor": mon, "class": cls, "title": "probe",
+            "fullscreen": 0, "focusHistoryID": n, "grouped": [], "pinned": False}
+
+
+def layer(x, y, w, h, ns):
+    return {"address": "0xbeef", "x": x, "y": y, "w": w, "h": h, "namespace": ns}
+
+
+laptop = monitor(0, "eDP-1", 2560, 1600, scale=1.6, focused=True)
+side = monitor(1, "DP-2", 1920, 1080, x=1600, transform=3, ws=2)
+FIXTURES = {
+    "two tiles": ([monitor(0, "A", 1920, 1080, focused=True)],
+                  [client(1, 10, 40, 940, 1000), client(2, 960, 40, 950, 1000)], {}),
+    "fractional scale and a rotated monitor": (
+        [laptop, side],
+        [client(1, 9, 37, 781, 953), client(2, 801, 37, 790, 953, cls="probe-pass"),
+         client(3, 1610, 10, 1060, 900, mon=1, ws=2, cls="com.mitchellh.ghostty")],
+        {"eDP-1": {"levels": {"2": [layer(0, 0, 1600, 26, "bar")]}}}),
+    "a float over a tile": (
+        [monitor(0, "A", 1920, 1080, focused=True)],
+        [client(1, 100, 100, 400, 300, floating=True), client(2, 10, 40, 1900, 1000)], {}),
+    "over the budget": (
+        [monitor(0, "A", 1920, 1080, focused=True), monitor(1, "B", 1920, 1080, x=1920, ws=2)],
+        [client(i + 1, 10 + 70 * i, 40, 60, 1000) for i in range(20)]
+        + [client(40 + i, 1930 + 70 * i, 40, 60, 1000, mon=1, ws=2) for i in range(10)], {}),
+    "an empty desk": ([monitor(0, "A", 1920, 1080, focused=True)], [], {}),
+}
+
+fails = 0
+
+
+def verdict(ok, text, detail=""):
+    global fails
+    fails += 0 if ok else 1
+    print(f"  {'ok  ' if ok else 'FAIL'} {text}")
+    if detail and not ok:
+        print(detail)
+
+
+def bash_block():
+    r = subprocess.run(["bash", "-c", f'source "{GEOMETRY}"; emit_block "$(cap "$(tubes_json)")"'],
+                       capture_output=True, text=True)
+    return re.sub(r"// ---- (END )?TUBE DATA[^\n]*\n", "", r.stdout)
+
+
+def theirs_only(block):
+    """The block without the two arrays only this plugin adds."""
+    return re.sub(r"const int   TUBE_(PASS|QUIET)\[TUBE_COUNT\] = [^;]*;\n", "", block)
+
+
+try:
+    budget = re.search(r"^MAX_TUBES=(\d+)", GEOMETRY.read_text(), re.M)
+    verdict(budget and int(budget.group(1)) == crt.MAX_TUBES,
+            f"the budget agrees with the geometry's ({crt.MAX_TUBES})")
+    for name, (mons, clients, layers) in FIXTURES.items():
+        (SB / "monitors.json").write_text(json.dumps(mons))
+        (SB / "clients.json").write_text(json.dumps(clients))
+        (SB / "layers.json").write_text(json.dumps(layers))
+        want = bash_block()
+        got = crt.td_tubes_block(("probe-pass",), True)
+        verdict(want and got is not None and theirs_only(got) == want,
+                f"{name}: identical to the geometry's own block ({want.count('vec4(')} rects)",
+                f"--- bash\n{want}\n--- crt\n{got}")
+        if name.startswith("fractional"):
+            flags = re.search(r"TUBE_PASS\[TUBE_COUNT\] = int\[TUBE_COUNT\]\(\n    ([^\n]*)", got).group(1)
+            quiet = re.search(r"TUBE_QUIET\[TUBE_COUNT\] = int\[TUBE_COUNT\]\(\n    ([^\n]*)", got).group(1)
+            mon = re.search(r"TUBE_MON\[TUBE_COUNT\]  = int\[TUBE_COUNT\]\(\n    ([^\n]*)", got).group(1)
+            verdict("1" in flags.split(", "), "and the passthrough class is flagged")
+            verdict(all((m == "0") == (q == "0") for m, q in zip(mon.split(", "), quiet.split(", "))),
+                    "and the unfocused monitor goes quiet")
+
+    # A class is the one string here a program chooses, and it lands in shader
+    # source. A newline would end the comment and put the rest into the code.
+    (SB / "monitors.json").write_text(json.dumps([monitor(0, "A", 1920, 1080, focused=True)]))
+    (SB / "clients.json").write_text(json.dumps(
+        [client(1, 10, 40, 1900, 1000, cls="evil\nconst float X = 1.0; \\")]))
+    (SB / "layers.json").write_text("{}")
+    got = crt.td_tubes_block((), True)
+    verdict(got is not None and "\nconst float X" not in got and "\\\n" not in got,
+            "a hostile window class cannot reach the compiler", str(got))
+
+    # Nobody answering is not an empty desk.
+    (SB / "clients.json").write_text("not json")
+    verdict(crt.td_tubes_block((), True) is None, "no answer from Hyprland is None, not zero tubes")
+finally:
+    shutil.rmtree(SB, ignore_errors=True)
+sys.exit(1 if fails else 0)

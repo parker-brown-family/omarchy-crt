@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A tile resized with no event must still move its tube. SANDBOXED probe.
+"""The watch, driven for real over fake sockets. SANDBOXED probe.
 
     test/probe-silent-resize            the watcher in this tree
     test/probe-silent-resize <crt>      any other build of it (e.g. HEAD's)
@@ -18,6 +18,11 @@ reading the same fixture for the geometry. The real watcher runs against them.
 After it settles, the fixture's tile is made narrower and NOTHING is sent on
 the event socket. Pass when the baked tube block picks up the new width within
 a second. It never touches the live compositor.
+
+THE OTHER DEATH. A watch that dies of a fatal error used to exit 0, so systemd's
+Restart=on-failure never fired and the warp simply stayed gone. The same rig
+takes the template away mid-watch and requires a non-zero exit, and requires a
+deliberate SIGTERM to still exit 0, with one flatten rather than two.
 
 Run against HEAD's crt from before the fix, it must FAIL — that is how this
 check was proven able to fail, and why it takes a path:
@@ -48,9 +53,13 @@ SIG = "probe_sig"
 HYPR = RUN / "hypr" / SIG
 FIX = SB / "clients.json"
 
+PLUGIN = SB / "plugin"     # a private copy, so a test can take its template away
 for d in (HOME / ".config/hypr", HOME / ".local/state/omarchy/current/theme",
-          HYPR, SB / "bin"):
+          HYPR, SB / "bin", PLUGIN):
     d.mkdir(parents=True, exist_ok=True)
+shutil.copy(CRT, PLUGIN / "crt")
+for f in ("crt-glass.frag", "tubes-geometry"):
+    shutil.copy(CRT.parent / f, PLUGIN / f)
 
 (HOME / ".local/state/omarchy/current/theme/colors.toml").write_text(
     'mode = "dark"\naccent = "#7aa2f7"\nbright_foreground = "#c0caf5"\n'
@@ -122,6 +131,8 @@ def request(conn):         # .socket.sock: one request, one answer, close
         conn.sendall(FIX.read_bytes())
     elif q.endswith(b"monitors"):
         conn.sendall(json.dumps(MON).encode())
+    elif q.endswith(b"layers"):
+        conn.sendall(b"{}")
     conn.close()
 
 
@@ -158,41 +169,71 @@ def rects():
     return [ln for ln in tubes().splitlines() if ln.lstrip().startswith("vec4(")]
 
 
-status = 1
-proc = subprocess.Popen([str(CRT), "tubes", "watch"], env=env,
-                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-out = []
-threading.Thread(target=lambda: out.extend(proc.stdout), daemon=True).start()
-try:
-    # Synchronise on the startup build having FINISHED (its line prints after
-    # the apply), not on the file appearing: the file is written before a
-    # sandbox apply that can take most of a second.
-    if not wait_for(lambda: any("<- start" in ln for ln in out), 15) or "TUBE_COUNT 2" not in tubes():
-        print(f"  FAIL the watcher never baked the two starting tiles\n{tubes()!r}")
-    else:
-        before = rects()
-        layout(600)            # the resize — and not one byte on socket2
-        t0 = time.monotonic()
-        moved = wait_for(lambda: rects() and rects() != before, 1.5)
-        dt = (time.monotonic() - t0) * 1000
-        if moved:
-            print(f"  ok   a silent resize moved the tube rects in {dt:.0f} ms "
-                  "(sandbox: stub hyprctl, slower than a live desk)")
-            status = 0
-        else:
-            print("  FAIL a tile resized with no event; the tube rects kept the old size")
-        if os.environ.get("CRT_PROBE_VERBOSE"):
-            print("before:", *before, "after:", *rects(), sep="\n  ")
-finally:
+def watch():
+    """Start the watcher and wait for its startup build to FINISH (the line
+    prints after the apply), not for the file to appear: the file is written
+    before a sandbox apply that can take most of a second."""
+    layout(940)
+    proc = subprocess.Popen([str(PLUGIN / "crt"), "tubes", "watch"], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    out = []
+    threading.Thread(target=lambda: out.extend(proc.stdout), daemon=True).start()
+    started = wait_for(lambda: any("<- start" in ln for ln in out), 15)
+    return proc, out, started and "TUBE_COUNT 2" in tubes()
+
+
+def stop(proc):
     proc.send_signal(signal.SIGTERM)
     try:
-        proc.wait(timeout=5)
+        return proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         proc.kill()
-        proc.wait()
+        return proc.wait()
+
+
+fails = 0
+
+
+def verdict(ok, text):
+    global fails
+    fails += 0 if ok else 1
+    print(f"  {'ok  ' if ok else 'FAIL'} {text}")
+
+
+try:
+    # A silent resize, then a deliberate stop.
+    proc, out, ready = watch()
+    verdict(ready, "the watcher baked the two starting tiles")
+    before = rects()
+    layout(600)                # the resize — and not one byte on socket2
+    t0 = time.monotonic()
+    moved = wait_for(lambda: rects() and rects() != before, 1.5)
+    dt = (time.monotonic() - t0) * 1000
+    verdict(moved, f"a silent resize moved the tube rects ({dt:.0f} ms, sandbox numbers)")
+    if os.environ.get("CRT_PROBE_VERBOSE"):
+        print("before:", *before, "after:", *rects(), sep="\n  ")
+    code = stop(proc)
+    verdict(code == 0, f"a deliberate stop exits 0 (got {code})")
+    applies = sum("on=1 tubes=0" in ln for ln in out)
+    verdict(applies == 1, f"and flattens the glass once, not twice (got {applies})")
     if os.environ.get("CRT_PROBE_VERBOSE"):
         print("".join(out))
+
+    # A fatal build. The template going away is what `die()` looks like from
+    # here; a watch that swallows it exits 0 and systemd never brings it back.
+    proc, out, ready = watch()
+    (PLUGIN / "crt-glass.frag").rename(PLUGIN / "gone.frag")
+    layout(300)
+    try:
+        code = proc.wait(timeout=6)
+    except subprocess.TimeoutExpired:
+        code = stop(proc)
+        verdict(False, "a fatal build ended the watch")
+    (PLUGIN / "gone.frag").rename(PLUGIN / "crt-glass.frag")
+    verdict(code != 0, f"a fatal build exits non-zero (got {code})")
+    verdict("TUBE_COUNT 0" in tubes(), "and still leaves the glass flat")
+finally:
     for s in servers:
         s.close()
     shutil.rmtree(SB, ignore_errors=True)
-sys.exit(status)
+sys.exit(1 if fails else 0)

@@ -50,9 +50,11 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 HOME = Path.home()
@@ -444,7 +446,7 @@ def render(st, path=None, validate=True):
     #
     # This is skipped on the watch's hot path (validate=False): a window event
     # fires several times a second, glslangValidator costs ~110 ms each, and the
-    # tube and fx blocks the watch splices are machine-generated with a fixed,
+    # tube block the watch splices is machine-generated with a fixed,
     # test-covered structure — not user input a typo can break. The watcher still
     # validates its FIRST render of a session, and every user knob change (`crt
     # set`) goes through the full check, so a systemic breakage is still caught
@@ -527,14 +529,51 @@ def hyprctl(*args):
     return subprocess.run(["hyprctl", *args], capture_output=True, text=True).stdout
 
 
+def hypr_query(what):
+    """Ask Hyprland a read-only JSON question, or None when nobody answered.
+
+    Straight down the request socket, because spawning hyprctl costs ~30 ms on
+    a busy box and the socket ~0.5 ms, and the watch asks several times per
+    rebuild. hyprctl stays as the fallback for a session with no socket to
+    reach. None is "could not look", never "there are none".
+    """
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    rt = os.environ.get("XDG_RUNTIME_DIR")
+    if sig and rt:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as q:
+                q.settimeout(0.5)
+                q.connect(str(Path(rt) / "hypr" / sig / ".socket.sock"))
+                q.sendall(f"j/{what}".encode())
+                raw = b""
+                while chunk := q.recv(65536):
+                    raw += chunk
+            return json.loads(raw)
+        except (OSError, ValueError):
+            pass
+    try:
+        return json.loads(hyprctl(what, "-j") or "")
+    except ValueError:
+        return None
+
+
+# Set the first time Hyprland refuses `keyword`, so every later swap goes
+# straight to eval instead of paying for a refusal it already knows about.
+_KEYWORD_RETIRED = False
+
+
 def set_shader(path):
     """Hyprland 0.56's Lua config retired `hyprctl keyword` — and it fails
     SOFTLY, printing a line and changing nothing, so a redirect to /dev/null
     reads as success. Try keyword for older builds, detect the refusal in its
     output, and drive hl.config through eval where the config is Lua."""
-    out = hyprctl("keyword", "decoration:screen_shader", str(path))
-    if out is not None and "non-legacy" in out:
-        hyprctl("eval", f'hl.config({{ decoration = {{ screen_shader = "{path}" }} }})')
+    global _KEYWORD_RETIRED
+    if not _KEYWORD_RETIRED:
+        out = hyprctl("keyword", "decoration:screen_shader", str(path))
+        _KEYWORD_RETIRED = out is not None and "non-legacy" in out
+        if not _KEYWORD_RETIRED:
+            return
+    hyprctl("eval", f'hl.config({{ decoration = {{ screen_shader = "{path}" }} }})')
 
 
 def write_passthrough():
@@ -578,54 +617,111 @@ def write_passthrough():
 # bin/sync-tubes-geometry, which is the only way it changes. The theme's file
 # stays the single place the geometry is edited; the plugin stands alone.
 GEOMETRY = PLUGIN / "tubes-geometry"
+MAX_TUBES = 24     # the geometry's own budget; test/probe-snapshot-parity holds them equal
+
+
+def geometry_program():
+    """The jq program inside the vendored geometry, or None.
+
+    The rects are worked out by that one program, and it stays the theme's: this
+    lifts it out of the generated file rather than reimplementing it. Running it
+    through the file's own shell functions meant 9 jq and 3 hyprctl processes
+    per rebuild, ~240 ms on a busy box, for a job one jq run does in a fifth of
+    that. Everything around it (the budget, the block) is a few lines below.
+    """
+    global _GEOMETRY_PROGRAM
+    if _GEOMETRY_PROGRAM is None and GEOMETRY.exists():
+        m = re.search(r"""jq -n --argjson m "\$mons" --argjson c "\$clients" """
+                      r"""--argjson l "\$layers" '(.*?)\n  '\n}""",
+                      GEOMETRY.read_text(), re.S)
+        _GEOMETRY_PROGRAM = m.group(1) if m else None
+    return _GEOMETRY_PROGRAM
+
+
+_GEOMETRY_PROGRAM = None
+
+
+def tube_rows():
+    """Every surface that gets a tube, as dicts, or None when it cannot be known."""
+    program = geometry_program()
+    mons, clients = hypr_query("monitors"), hypr_query("clients")
+    if program is None or mons is None or clients is None or not shutil.which("jq"):
+        return None
+    layers = hypr_query("layers")
+    r = subprocess.run(
+        ["jq", "-nc", "--argjson", "m", json.dumps(mons), "--argjson", "c", json.dumps(clients),
+         "--argjson", "l", json.dumps({} if layers is None else layers), program],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"crt: geometry failed: {r.stderr.strip()[:200]}", file=sys.stderr, flush=True)
+        return None
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return None
+
+
+def over_budget(rows):
+    """Whole monitors go flat when the tubes will not fit. A monitor half in and
+    half out would be torn, so a monitor that does not fit is dropped entire,
+    the lowest ids being kept first, which is the geometry's own `cap`."""
+    if len(rows) <= MAX_TUBES:
+        return rows
+    keep = []
+    for mon in sorted({r["mon"] for r in rows}):
+        group = [r for r in rows if r["mon"] == mon]
+        if len(keep) + len(group) <= MAX_TUBES:
+            keep += group
+        else:
+            print(f"crt: monitor {mon} goes flat: {len(group)} surface(s) over the "
+                  f"{MAX_TUBES}-tube budget", file=sys.stderr, flush=True)
+    return keep
 
 
 def td_tubes_block(passthrough=(), quiet_unfocused=True):
     """The current TUBE block for the live layout, or None.
 
-    The geometry emits a `// <class>` comment on every rect line, which is what
-    lets the passthrough list be written in terms of window classes rather than
-    indices into a list that changes every time a window opens.
+    The window class rides on each rect line as a comment. It is the only text
+    here a program chose, so it is reduced to safe characters first: a newline
+    or a trailing backslash would otherwise reach the compiler as code.
     """
-    if not GEOMETRY.exists():
+    rows = tube_rows()
+    if rows is None:
         return None
-    r = subprocess.run(
-        ["bash", "-c", f'source "{GEOMETRY}"; emit_block "$(cap "$(tubes_json)")"'],
-        capture_output=True, text=True)
-    if r.returncode != 0 or "#define TUBE_COUNT" not in r.stdout:
-        return None
-
-    # Strip td-tubes' own markers; render() supplies its own.
-    body = re.sub(r"^// ---- TUBE DATA[^\n]*\n", "", r.stdout)
-    body = re.sub(r"// ---- END TUBE DATA ----\n?$", "", body)
-
-    n = int(re.search(r"#define TUBE_COUNT\s+(\d+)", body).group(1))
+    rows = over_budget(rows)
+    n = len(rows)
     if n == 0:
-        return body
+        return "#define TUBE_COUNT 0\n"
 
-    classes = re.findall(r"^\s*vec4\([^)]*\),?\s*//\s*(.+?)\s*$", body, re.M)
-    if len(classes) != n:
-        # No class comments to key on, so nothing can be opted out — which is
-        # the old behaviour, not a failure. Say nothing and carry on.
-        classes = [""] * n
-    flags = ", ".join("1" if c in passthrough else "0" for c in classes)
+    def num(v):
+        return repr(float(v))
+
+    def curv(r):
+        c = r.get("curv")
+        return num(1 if c is None or c is False else c)
+
+    rects = "\n".join(
+        f"    vec4({num(r['x'])}, {num(r['y'])}, {num(r['w'])}, {num(r['h'])})"
+        f"{',' if i < n - 1 else ''} // "
+        + re.sub(r"[^\w .:+@-]", "_", str(r.get("class") or ""))
+        for i, r in enumerate(rows))
 
     # A tube on a monitor without focus goes quiet: that monitor usually stops
     # being rendered, and a clock that never advances leaves the band stranded.
     # An unknown focus silences nothing — see focused_monitor().
-    mons = re.search(r"TUBE_MON\[TUBE_COUNT\]\s*=\s*\w+\[TUBE_COUNT\]\(([^)]*)\)",
-                     body, re.S)
     fm = focused_monitor() if quiet_unfocused else None
-    if mons and fm is not None:
-        ids = [v.strip() for v in mons.group(1).split(",")]
-        quiet = ", ".join("0" if v == str(fm) else "1" for v in ids)
-    else:
-        quiet = ", ".join(["0"] * n)
+    quiet = ["0" if fm is None or r["mon"] == fm else "1" for r in rows]
+    flags = ["1" if r.get("class") in passthrough else "0" for r in rows]
 
-    return body.replace(
-        "#endif",
-        f"const int   TUBE_PASS[TUBE_COUNT] = int[TUBE_COUNT](\n    {flags}\n);\n"
-        f"const int   TUBE_QUIET[TUBE_COUNT] = int[TUBE_COUNT](\n    {quiet}\n);\n#endif")
+    return (f"#define TUBE_COUNT {n}\n#if TUBE_COUNT > 0\n"
+            f"const vec4 TUBE_RECT[TUBE_COUNT] = vec4[TUBE_COUNT](\n{rects}\n);\n"
+            f"const int  TUBE_MON[TUBE_COUNT]  = int[TUBE_COUNT](\n"
+            f"    {', '.join(str(r['mon']) for r in rows)}\n);\n"
+            f"const float TUBE_CURV[TUBE_COUNT] = float[TUBE_COUNT](\n"
+            f"    {', '.join(curv(r) for r in rows)}\n);\n"
+            f"const int   TUBE_PASS[TUBE_COUNT] = int[TUBE_COUNT](\n    {', '.join(flags)}\n);\n"
+            f"const int   TUBE_QUIET[TUBE_COUNT] = int[TUBE_COUNT](\n    {', '.join(quiet)}\n);\n"
+            f"#endif\n")
 
 
 def focused_monitor():
@@ -634,14 +730,11 @@ def focused_monitor():
     None is not "monitor 0" — it means nobody said, and the caller leaves every
     tube performing rather than silencing the wrong screen on a guess.
     """
-    out = hyprctl("monitors", "-j")
-    if not out:
-        return None
     try:
-        for m in json.loads(out):
+        for m in hypr_query("monitors") or ():
             if m.get("focused"):
                 return int(m["id"])
-    except (ValueError, KeyError, TypeError):
+    except (KeyError, TypeError, ValueError, AttributeError):
         return None
     return None
 
@@ -673,7 +766,8 @@ def tubes_once():
         return
     block = td_tubes_block(st.get("passthrough", []), st.get("quietUnfocused", True))
     if block is None:
-        die(f"geometry missing at {GEOMETRY} — run bin/sync-tubes-geometry (glass stays flat)")
+        die(f"no rects: Hyprland did not answer, or {GEOMETRY} is unreadable "
+            "— `bin/sync-tubes-geometry` restores it (glass stays flat)")
     write_tubes(block)
     apply(st)
     n = re.search(r"#define TUBE_COUNT\s+(\d+)", block)
@@ -693,7 +787,8 @@ def tubes_watch():
               "— `crt on` starts it", flush=True)
         return
     if td_tubes_block() is None:
-        die(f"geometry missing at {GEOMETRY} — run bin/sync-tubes-geometry")
+        die(f"no rects: Hyprland did not answer, or {GEOMETRY} is unreadable "
+            "— `bin/sync-tubes-geometry` restores it")
 
     sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
     rt = os.environ.get("XDG_RUNTIME_DIR")
@@ -703,23 +798,32 @@ def tubes_watch():
     if not sock_path.exists():
         die(f"no event socket at {sock_path}")
 
-    import socket as _socket
     import select as _select
     import time as _time
 
     STATE.mkdir(parents=True, exist_ok=True)
     WATCHER_PID.write_text(str(os.getpid()) + "\n")
+    # A file from a hand-run watch years ago reads as current state. The live
+    # watch logs to the journal, and nothing writes this any more.
+    (STATE / "watch.log").unlink(missing_ok=True)
 
-    def flatten(*_):
+    flattened = False
+
+    def flatten(*_, status=0):
         # Leaving the last rects behind on the way out is the snapshot bug with
-        # extra steps, so the glass goes flat when the watch stops.
-        write_tubes("#define TUBE_COUNT 0\n")
-        try:
-            apply(load())
-        except SystemExit:
-            pass
-        WATCHER_PID.unlink(missing_ok=True)
-        raise SystemExit(0)
+        # extra steps, so the glass goes flat when the watch stops. `status` is
+        # what systemd reads: a deliberate stop is 0, a death is not, and
+        # Restart=on-failure only brings the warp back if it can tell them apart.
+        nonlocal flattened
+        if not flattened:
+            flattened = True
+            write_tubes("#define TUBE_COUNT 0\n")
+            try:
+                apply(load())
+            except SystemExit:
+                pass
+            WATCHER_PID.unlink(missing_ok=True)
+        raise SystemExit(status)
 
     import signal
     signal.signal(signal.SIGTERM, flatten)
@@ -748,7 +852,7 @@ def tubes_watch():
             return
         last = key
         write_tubes(block)
-        apply(load(), validate=validate)
+        apply(stw, validate=validate)
         n = re.search(r"#define TUBE_COUNT\s+(\d+)", block)
         print(f"crt: {n.group(1) if n else '?'} tube(s)  <- {why}", flush=True)
 
@@ -767,48 +871,45 @@ def tubes_watch():
     # also asks the request socket for the clients every RECT_POLL and treats a
     # changed rect like an event. One query is ~0.13 ms; the snapshot it can
     # trigger only runs when something actually moved.
-    req_path = sock_path.with_name(".socket.sock")
     RECT_POLL = 0.10
 
     def rects():
         """Every client's place and size, or None when the socket did not answer
         — None is "could not look", never "no windows", so it changes nothing."""
         try:
-            q = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-            q.settimeout(0.5)
-            q.connect(str(req_path))
-            q.sendall(b"j/clients")
-            raw = b""
-            while chunk := q.recv(65536):
-                raw += chunk
-            q.close()
             return tuple(sorted(
                 (c.get("address"), tuple(c.get("at") or ()), tuple(c.get("size") or ()))
-                for c in json.loads(raw)))
-        except (OSError, ValueError, TypeError, AttributeError):
+                for c in hypr_query("clients")))
+        except (TypeError, AttributeError):
             return None
 
     print(f"crt: watching {sock_path} (ctrl-c to stop)", flush=True)
     seen_rects = rects()
-    build("start", validate=True)
     next_poll = _time.monotonic() + RECT_POLL
-
-    s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-    s.connect(str(sock_path))
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     buf = b""
     # A window action is a BURST of events (openwindow, then movewindow for each
     # sibling the tiler shifts, then activewindow). Rather than rebuild on each,
     # collect the burst and rebuild once it goes quiet for DEBOUNCE — capped at
     # COALESCE_MAX so a continuous churn (dragging across monitors) still repaints
     # several times a second rather than deferring forever.
+    #
+    # COALESCE_MAX is also the speed limit, and the limit is the compositor's: a
+    # layout the driver has not seen compiles for 60-95 ms with the whole desktop
+    # frozen (measured 2026-11-03, 21 KB shader, 7 tubes; a layout it has seen is
+    # ~10 ms from its disk cache). A held resize at the poll's own rate would
+    # leave the desktop stalled most of the time it was moving.
     DEBOUNCE = 0.045
     COALESCE_MAX = 0.20
+    last_build = 0.0
     dirty = False
     first_pending = None
     deadline = None
     banner_pending = False
     why = "burst"
     try:
+        s.connect(str(sock_path))     # before the build, so nothing it takes is missed
+        build("start", validate=True)
         while True:
             now = _time.monotonic()
             timeout = max(0.0, next_poll - now)
@@ -856,18 +957,20 @@ def tubes_watch():
                         deadline = now + DEBOUNCE   # slide the quiet-gap window
 
             # The silent resize (see RECT_POLL). The poll interval is already the
-            # debounce, so a changed rect rebuilds now rather than sliding the
-            # window: holding SUPER+= repeats faster than DEBOUNCE, and a sliding
-            # gap would hold the warp still until COALESCE_MAX every time. A burst
-            # already pending keeps its own debounce — its build snapshots the new
-            # rects anyway, and cutting it short would split one open into two.
+            # debounce, so a changed rect rebuilds as soon as the speed limit
+            # allows rather than sliding the window: holding SUPER+= repeats
+            # faster than DEBOUNCE, and a sliding gap would hold the warp still.
+            # A burst already pending keeps its own debounce — its build snapshots
+            # the new rects anyway, and cutting it short would split one open
+            # into two.
             if now >= next_poll:
                 next_poll = now + RECT_POLL
                 r = rects()
                 if r is not None and r != seen_rects:
                     seen_rects = r
                     if not dirty:
-                        dirty, first_pending, deadline = True, now, now
+                        dirty, first_pending = True, now
+                        deadline = max(now, last_build + COALESCE_MAX)
                         why = "resize"
 
             # The burst has settled (quiet for DEBOUNCE) or has run long enough
@@ -878,8 +981,10 @@ def tubes_watch():
                 # The build snapshots the layout as it is now, so the poll's
                 # baseline moves with it — else the next poll re-reports what an
                 # event-driven build already drew.
-                seen_rects = rects() or seen_rects
+                r = rects()
+                seen_rects = seen_rects if r is None else r
                 build(why)
+                last_build = _time.monotonic()
                 if banner_pending:
                     banner_pending = False
                     # Close the banner the reload raised — but only when the
@@ -897,10 +1002,16 @@ def tubes_watch():
                         if re.search(r"^#define ANIMATED\s+1\b",
                                      SHADER.read_text(), re.M):
                             hyprctl("seterror", "disable")
+                            print("crt: banner closed  <- reload", flush=True)
                     except OSError:
                         pass
-    finally:
-        flatten()
+    except SystemExit as e:
+        # A signal already flattened and arrives here to leave; die() has not.
+        flatten(status=e.code)
+    except Exception:
+        traceback.print_exc()
+        flatten(status=1)
+    flatten()
 
 
 def live_shader():
@@ -1352,7 +1463,8 @@ def apply(st, validate=True):
     n = re.search(r"#define TUBE_COUNT\s+(\d+)", txt)
     anim = re.search(r"^#define ANIMATED\s+([01])", txt, re.M)
     clock_on = bool(anim and anim.group(1) == "1") and st["on"]
-    preconditions(clock_on, int(n.group(1)) if (n and st["on"]) else 0)
+    tubes = int(n.group(1)) if (n and st["on"]) else 0
+    preconditions(clock_on, tubes)
     if st["on"]:
         swap_in(out)
     else:
@@ -1364,15 +1476,11 @@ def apply(st, validate=True):
     # moment later. Restating after the swap means a late reset loses. This
     # second assert is FORCED (past the skip-if-unchanged cache) but ONLY on the
     # full path (validate=True: CLI, install, startup). On the watch's hot path
-    # the cache already made the first call a no-op when the tier held, and
-    # paying a forced round trip per arc is exactly the contention being removed;
-    # a reload there is handled by reset_preconditions() on configreloaded.
+    # the cache already made the first call a no-op when the tier held, and a
+    # forced round trip per rebuild is contention for nothing; a reload there is
+    # handled by reset_preconditions() on configreloaded.
     if validate:
-        txt2 = out.read_text()
-        n2 = re.search(r"#define TUBE_COUNT\s+(\d+)", txt2)
-        anim2 = re.search(r"^#define ANIMATED\s+([01])", txt2, re.M)
-        clock_on2 = bool(anim2 and anim2.group(1) == "1") and st["on"]
-        preconditions(clock_on2, int(n2.group(1)) if (n2 and st["on"]) else 0, force=True)
+        preconditions(clock_on, tubes, force=True)
     # A banner the race above already latched does not clear itself: nothing
     # re-evaluates it, and the restated tier only stops the NEXT compile from
     # complaining. `hyprctl reload` was long believed the only way to take it
@@ -1383,11 +1491,10 @@ def apply(st, validate=True):
     # its own probes and never by reading the bar.
     # Clearing the red banner and reading configerrors are the full path's job.
     # On the hot path the compile already saw tier 0 (preconditions set it before
-    # the swap), so no banner is raised and there is nothing to clear — and each
-    # of these is one more contended round trip per arc, which is the whole cost
-    # being cut here.
+    # the swap), so no banner is raised and there is nothing to clear.
     if validate and clock_on:
         hyprctl("seterror", "disable")
+        print("crt: banner closed  <- apply", flush=True)
     # The forensic line names every compile we cause — clock state, tier and
     # tube count, with a wall clock — so a picture of the banner plus its
     # timestamp convicts one specific swap. `animated` is the RENDERED clock.
