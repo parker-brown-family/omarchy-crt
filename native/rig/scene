@@ -10,5 +10,7 @@ wayland-scanner client-header "$X" "$S/home/vp.h"
 wayland-scanner private-code "$X" "$S/home/vp.c"
 gcc -O1 -I"$S/home" "$here/rig/vptr.c" "$S/home/vp.c" -o "$S/home/vptr" $(pkg-config --cflags --libs wayland-client)
 "$here/rig/up" "$S"
+cp "$here/../crt/crt-glass.frag" "$S/home/crt-glass.frag"
+[[ -f "$S/home/knobs.txt" ]] || : >"$S/home/knobs.txt"
 timeout 6 "$S/in" hyprctl plugin load "$S/home/crt-pass.so" | tail -1
 timeout 5 "$S/in" hyprctl dismissnotify >/dev/null || true

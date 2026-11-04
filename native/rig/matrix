@@ -9,6 +9,7 @@ seat() {
   CRT_SEAT="$1" timeout 90 "$here/rig/scene" "$S" 2>&1 | grep -E " error|seat up|could not"
 }
 prove() { # name
+  timeout 80 "$here/rig/prove-look" "$S" "$S/$1" 2>&1 | sed 's/^/    /' ; [[ ${PIPESTATUS[0]} -eq 0 ]] || bad=$((bad+1))
   timeout 60 "$here/rig/prove" "$S" "$S/$1" 2>&1 | sed 's/^/    /' ; [[ ${PIPESTATUS[0]} -eq 0 ]] || bad=$((bad+1))
   timeout 70 "$here/rig/prove-pointer" "$S" "$S/$1" 2>&1 | sed 's/^/    /' ; [[ ${PIPESTATUS[0]} -eq 0 ]] || bad=$((bad+1))
 }

@@ -7,8 +7,13 @@
 // compositor every frame, so a layout change never compiles anything.
 #include <GLES3/gl32.h>
 #include <algorithm>
+#include <dlfcn.h>
+#include <filesystem>
+#include <regex>
+#include <string>
 #include <map>
 #include <cmath>
+#include <chrono>
 #include <fstream>
 #include <stdexcept>
 #include <unistd.h>
@@ -23,7 +28,6 @@
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/helpers/math/Math.hpp>
 #include <hyprland/src/state/MonitorState.hpp>
-#include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/pointer/PointerManager.hpp>
 #include <hyprland/src/desktop/state/ViewStateTracker.hpp>
@@ -32,69 +36,131 @@
 #include <hyprland/protocols/wlr-layer-shell-unstable-v1.hpp>
 
 static HANDLE PHANDLE = nullptr;
-static constexpr double K1 = 0.26, K2 = 0.11;    // the shader's, and they must agree
 static long   g_frames = 0, g_programs = 0;
 
-static const char* VS = R"(#version 300 es
-out vec2 uv;
+static const char* VS = R"(#version 320 es
+out vec2 v_texcoord;
 void main() {
     vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
-    uv = p;
+    v_texcoord = p;
     gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 })";
 
-// tube_map is crt-glass.frag's, with rects as uniforms instead of baked arrays.
-static const char* FS = R"(#version 300 es
-precision highp float;
-#define MAX_TUBES 24
-in vec2 uv;
-out vec4 frag;
-uniform sampler2D tex;
-uniform vec2 res;
-uniform int count;
-uniform vec4 rects[MAX_TUBES];
-const float K1 = 0.26, K2 = 0.11, SCAN = 0.16;
-void main() {
-    vec2 px = uv * res;   // Hyprland's framebuffers are top-down, as rects are
-    for (int i = 0; i < MAX_TUBES; i++) {
-        if (i >= count) break;
-        vec4 r = rects[i];
-        vec2 l = (px - r.xy) / r.zw;
-        if (l.x < 0.0 || l.x > 1.0 || l.y < 0.0 || l.y > 1.0) continue;
-        vec2  c  = l - 0.5;
-        float r2 = dot(c, c);
-        vec2  w  = 0.5 + c * (1.0 + K1 * r2 + K2 * r2 * r2);
-        vec2  e  = min(w, 1.0 - w);
-        float edge = smoothstep(0.0, 0.004, min(e.x, e.y));
-        if (edge <= 0.0) { frag = vec4(0.0, 0.0, 0.0, 1.0); return; }
-        vec2  s  = (r.xy + clamp(w, 0.0, 1.0) * r.zw) / res;
-        vec3  col = texture(tex, s).rgb;
-        col *= 1.0 - SCAN * step(1.0, mod(gl_FragCoord.y, 3.0)) * 0.5;
-        col *= 1.0 - dot(c, c) * 0.5;
-        frag = vec4(col * edge, 1.0);
-        return;
+// THE LOOK LIVES IN ONE PLACE. crt-glass.frag is compiled here as it ships, with
+// its knobs rewritten from constants into uniforms and its baked tube arrays into
+// uniform arrays. So there is no second copy of the optics to drift, and a knob or
+// a layout change is a uniform write, never a compile.
+static constexpr int MAX_TUBES = 24;
+
+struct SKnob {
+    std::string name;
+    float       value[3] = {0, 0, 0};
+    int         size     = 1;
+    GLint       loc      = -1;
+};
+static std::vector<SKnob> g_knobs;
+static bool               g_animated = false;
+
+static std::string pluginDir() {
+    Dl_info i{};
+    dladdr((void*)&pluginDir, &i);
+    std::string p = i.dli_fname ? i.dli_fname : "";
+    return p.substr(0, p.rfind('/'));
+}
+
+static std::string nativeSource() {
+    std::ifstream f(pluginDir() + "/crt-glass.frag");
+    if (!f)
+        return {};
+    static const std::regex knob(R"(^const float (\w+)\s*=\s*(-?[0-9.]+);.*)");
+    static const std::regex derived(R"(^const float (\w+)\s*=\s*([^;]+);.*)");
+    static const std::regex colour(R"(^const vec3\s+(\w+)\s*=\s*vec3\(([^,]+),([^,]+),([^)]+)\);.*)");
+    std::string out, line;
+    std::smatch m;
+    bool        inTubes = false;
+    g_knobs.clear();
+    while (std::getline(f, line)) {
+        if (line.starts_with("// ---- TUBE DATA")) {
+            inTubes = true;
+            out += "#define TUBE_COUNT " + std::to_string(MAX_TUBES) + "\n"
+                   "uniform vec4  TUBE_RECT[TUBE_COUNT];\nuniform int   TUBE_MON[TUBE_COUNT];\n"
+                   "uniform float TUBE_CURV[TUBE_COUNT];\nuniform int   TUBE_PASS[TUBE_COUNT];\n"
+                   "uniform int   TUBE_QUIET[TUBE_COUNT];\n";
+        } else if (line.starts_with("// ---- END TUBE DATA")) {
+            inTubes = false;
+        } else if (inTubes) {
+            continue;
+        } else if (line.starts_with("#define ANIMATED")) {
+            out += "#define ANIMATED 1\n";          // the clock is a uniform too; 0 stands still
+        } else if (std::regex_match(line, m, knob)) {
+            g_knobs.push_back({.name = m[1], .value = {std::stof(m[2])}, .size = 1});
+            out += "uniform float " + m[1].str() + ";\n";
+        } else if (std::regex_match(line, m, derived)) {
+            out += "#define " + m[1].str() + " (" + m[2].str() + ")\n";
+        } else if (std::regex_match(line, m, colour)) {
+            g_knobs.push_back({.name = m[1], .value = {std::stof(m[2]), std::stof(m[3]), std::stof(m[4])}, .size = 3});
+            out += "uniform vec3 " + m[1].str() + ";\n";
+        } else {
+            out += line + "\n";
+        }
     }
-    frag = vec4(texture(tex, uv).rgb, 1.0);
-})";
+    return out;
+}
+
+static float knob(const char* name, float fallback) {
+    for (auto const& k : g_knobs)
+        if (k.name == name)
+            return k.value[0];
+    return fallback;
+}
+
+// knobs.txt is what `crt` publishes: "NAME value", or "NAME r g b" for a colour.
+static void readKnobs() {
+    static std::filesystem::file_time_type seen{};
+    std::error_code                        ec;
+    const auto                             path = pluginDir() + "/knobs.txt";
+    const auto                             t    = std::filesystem::last_write_time(path, ec);
+    if (ec || t == seen)
+        return;
+    seen = t;
+    std::ifstream f(path);
+    std::string   name;
+    while (f >> name) {
+        if (name == "ANIMATED") {
+            f >> g_animated;
+            continue;
+        }
+        float v[3] = {};
+        auto  it   = std::ranges::find_if(g_knobs, [&](auto const& k) { return k.name == name; });
+        for (int i = 0; i < (it == g_knobs.end() ? 1 : it->size); i++)
+            f >> v[i];
+        if (it != g_knobs.end())
+            std::copy(v, v + 3, it->value);
+    }
+}
 
 static GLuint build() {
-    auto sh = [](GLenum t, const char* s) {
-        GLuint o = glCreateShader(t);
-        glShaderSource(o, 1, &s, nullptr);
+    auto sh = [](GLenum t, const std::string& s) {
+        GLuint      o = glCreateShader(t);
+        const char* c = s.c_str();
+        glShaderSource(o, 1, &c, nullptr);
         glCompileShader(o);
         GLint ok = 0;
         glGetShaderiv(o, GL_COMPILE_STATUS, &ok);
         if (!ok) {
-            char l[1024] = {};
+            char l[2048] = {};
             glGetShaderInfoLog(o, sizeof l, nullptr, l);
             std::ofstream(std::string(getenv("HOME")) + "/crt-pass.err", std::ios::app) << l << "\n";
         }
         return o;
     };
-    GLuint p = glCreateProgram();
+    const auto frag = nativeSource();
+    GLuint     p    = glCreateProgram();
     glAttachShader(p, sh(GL_VERTEX_SHADER, VS));
-    glAttachShader(p, sh(GL_FRAGMENT_SHADER, FS));
+    glAttachShader(p, sh(GL_FRAGMENT_SHADER, frag));
     glLinkProgram(p);
+    for (auto& k : g_knobs)
+        k.loc = glGetUniformLocation(p, k.name.c_str());
     g_programs++;
     return p;
 }
@@ -160,11 +226,28 @@ class CCrtPass : public IPassElement {
         glUseProgram(g_prog);
         glBindVertexArray(g_vao);
         glBindTexture(GL_TEXTURE_2D, sc.tex);
+        readKnobs();
+        for (auto const& k : g_knobs) {
+            if (k.size == 3) glUniform3fv(k.loc, 1, k.value);
+            else glUniform1f(k.loc, k.value[0]);
+        }
+        static const auto start = std::chrono::steady_clock::now();
+        const float       now   = std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count();
         glUniform1i(glGetUniformLocation(g_prog, "tex"), 0);
-        glUniform2f(glGetUniformLocation(g_prog, "res"), w, h);
-        glUniform1i(glGetUniformLocation(g_prog, "count"), (int)m_rects.size());
+        glUniform1f(glGetUniformLocation(g_prog, "time"), g_animated ? now : 0.F);
+        glUniform1i(glGetUniformLocation(g_prog, "wl_output"), 0);
+        // TUBE_MON is -1 past the live rects, which tube_at skips as another monitor.
+        std::array<int, MAX_TUBES>   mon, zero{};
+        std::array<float, MAX_TUBES> curv;
+        mon.fill(-1);
+        curv.fill(1.F);
+        std::fill_n(mon.begin(), m_rects.size(), 0);
+        glUniform1iv(glGetUniformLocation(g_prog, "TUBE_MON"), MAX_TUBES, mon.data());
+        glUniform1fv(glGetUniformLocation(g_prog, "TUBE_CURV"), MAX_TUBES, curv.data());
+        glUniform1iv(glGetUniformLocation(g_prog, "TUBE_PASS"), MAX_TUBES, zero.data());
+        glUniform1iv(glGetUniformLocation(g_prog, "TUBE_QUIET"), MAX_TUBES, zero.data());
         if (!m_rects.empty())
-            glUniform4fv(glGetUniformLocation(g_prog, "rects"), (int)m_rects.size(), m_rects[0].data());
+            glUniform4fv(glGetUniformLocation(g_prog, "TUBE_RECT"), (int)m_rects.size(), m_rects[0].data());
         glDrawArrays(GL_TRIANGLES, 0, 3);
 
         glBindTexture(GL_TEXTURE_2D, tex);
@@ -270,7 +353,7 @@ static std::optional<Vector2D> mapped(const Vector2D& p) {
             const auto c = (p - pos) / size - Vector2D{0.5, 0.5};
             if (std::abs(c.x) > 0.5 || std::abs(c.y) > 0.5)
                 continue;
-            const double r2 = c.x * c.x + c.y * c.y, k = 1.0 + K1 * r2 + K2 * r2 * r2;
+            const double r2 = c.x * c.x + c.y * c.y, k = 1.0 + knob("TUBE_K1", 0) * r2 + knob("TUBE_K2", 0) * r2 * r2;
             const double x = std::clamp(0.5 + c.x * k, 0.0, 0.999), y = std::clamp(0.5 + c.y * k, 0.0, 0.999);
             return pos + Vector2D{x, y} * size;
         }
@@ -314,17 +397,20 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         }
         // Test rig: a still screen rightly draws nothing, and a capture needs a
         // frame, so a waiting request keeps the seat drawing until it is served.
-        if (stage == RENDER_POST && access((std::string(getenv("HOME")) + "/keep-drawing").c_str(), F_OK) == 0)
-            g_pEventLoopManager->doLater([] {
-                for (auto& mon : State::monitorState()->monitors())
-                    g_pHyprRenderer->damageMonitor(mon);
-            });
+        // The clock wants the same. Damaged here, not through doLater, because a
+        // queued lambda would outlive an unload.
+        if (stage == RENDER_POST && (g_animated || access((std::string(getenv("HOME")) + "/keep-drawing").c_str(), F_OK) == 0))
+            for (auto& mon : State::monitorState()->monitors())
+                g_pHyprRenderer->damageMonitor(mon);
         auto m = g_pHyprRenderer->m_renderData.pMonitor.lock();
         if (!m) return;
         // Test rig: this file moves the pass to after the layers, which is where
         // the screen shader sits, so one scene can show today beside the fix.
-        const bool late = access((std::string(getenv("HOME")) + "/pass-late").c_str(), F_OK) == 0;
-        if (stage == (late ? RENDER_LAST_MOMENT : RENDER_POST_WINDOWS))
+        const std::string home = getenv("HOME");
+        const bool        late = access((home + "/pass-late").c_str(), F_OK) == 0;
+        // Test rig: this file stands the pass down, so today's screen shader can run alone.
+        if (access((home + "/pass-off").c_str(), F_OK) == 0) {
+        } else if (stage == (late ? RENDER_LAST_MOMENT : RENDER_POST_WINDOWS))
             g_pHyprRenderer->m_renderPass.add(makeUnique<CCrtPass>(tubes(m)));
         if (stage == RENDER_LAST_MOMENT)
             g_pHyprRenderer->m_renderPass.add(makeUnique<CDump>());

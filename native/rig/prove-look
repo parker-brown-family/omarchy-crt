@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Is the native pass the same picture as today's shader?  prove-look <state-dir> <out-dir>
+
+One scene, Parker's real knobs and theme, the clock stopped. The real `crt` tool
+drives today's screen shader and the plugin draws the native pass, and the two
+final frames are compared. Then a knob is turned and the clock started, and the
+picture must change with no compile.
+"""
+import importlib.machinery, importlib.util, json, os, shutil, subprocess, sys, time
+S, OUT = sys.argv[1], sys.argv[2]
+HOME = S + "/home"; HERE = os.path.dirname(os.path.abspath(__file__)); CRT = os.path.join(HERE, "..", "..", "crt", "crt")
+REAL = os.path.expanduser("~/.local/state/omarchy")
+os.makedirs(OUT, exist_ok=True)
+fails = 0
+def verdict(ok, text):
+    global fails
+    fails += 0 if ok else 1
+    print(f"  {'ok  ' if ok else 'FAIL'} {text}", flush=True)
+def inn(*a, **k):
+    return subprocess.run([S + "/in", *a], capture_output=True, text=True, timeout=30, **k)
+def grab(name):
+    """The final frame, through the screenshot path, so it includes a screen shader."""
+    time.sleep(1.0)
+    p = f"{HOME}/{name}.ppm"
+    r = inn("grim", "-t", "ppm", p)
+    if r.returncode: sys.exit(f"grim: {r.stderr}")
+    d = open(p, "rb").read()
+    parts = d.split(b"\n", 3)
+    w, h = map(int, parts[1].split())
+    shutil.copy(p, f"{OUT}/{name}.ppm")
+    return w, h, parts[3]
+def programs():
+    subprocess.run([HERE + "/shot", S, HOME + "/tmp.png"], capture_output=True, timeout=15)
+    return int(open(HOME + "/frame.txt").read().split("programs=")[1])
+def compare(a, b, w, h, skip=None):
+    n = big = tot = worst = 0
+    for y in range(0, h, 2):
+        for x in range(0, w, 2):
+            if skip and skip(x, y): continue
+            i = (y*w+x)*3
+            d = max(abs(a[i]-b[i]), abs(a[i+1]-b[i+1]), abs(a[i+2]-b[i+2]))
+            tot += d; n += 1; big += d > 6; worst = max(worst, d)
+    return tot / n, worst, 100 * big / n
+
+# Parker's knobs and theme, copied into the seat, with the clock stopped.
+st = f"{HOME}/.state/omarchy"
+os.makedirs(st + "/crt", exist_ok=True); os.makedirs(st + "/current/theme", exist_ok=True)
+k = json.load(open(REAL + "/crt/knobs.json")); k["animated"] = False; k["on"] = True; k["passthrough"] = []
+for f in ("FLICKER", "JIGGLE"): k["service"][f] = 0
+k["panel"]["TRACKING"] = 0
+json.dump(k, open(st + "/crt/knobs.json", "w"))
+shutil.copy(REAL + "/current/theme/colors.toml", st + "/current/theme/colors.toml")
+state_home = HOME + "/.state"
+os.environ.update(XDG_STATE_HOME=state_home, HOME=HOME)
+ld = importlib.machinery.SourceFileLoader("crtmod", CRT); sp = importlib.util.spec_from_loader("crtmod", ld)
+crt = importlib.util.module_from_spec(sp); ld.exec_module(crt)
+def publish(extra=None, animated=0):
+    e = crt.expand(crt.load()); e.update(extra or {})
+    lines = [f"{n} {v}" for n, v in e.items()] + [f"ANIMATED {animated}"]
+    ch = crt.theme_colours()
+    if ch: lines += ["PHOSPHOR %f %f %f" % tuple(ch[0]), "GLARE_TINT %f %f %f" % tuple(ch[1])]
+    open(HOME + "/knobs.txt", "w").write("\n".join(lines) + "\n")
+    return e
+e = publish()
+want = round(json.load(open(REAL + "/crt/knobs.json"))["panel"]["BARREL"] * 0.26, 4)
+print(f"  warp strength at your knobs: TUBE_K1 {e['TUBE_K1']}, TUBE_K2 {e['TUBE_K2']}", flush=True)
+verdict(e["TUBE_K1"] == want, f"the seat really is using your BARREL dial ({want})")
+
+open(HOME + "/keep-drawing", "w").close()
+for f in ("pass-off", "pass-late", "input-flat"):
+    try: os.unlink(f"{HOME}/{f}")
+    except OSError: pass
+subprocess.Popen([S + "/in", "env", "QT_QPA_PLATFORM=wayland", "QS_NO_RELOAD_POPUP=1", "quickshell", "-p", f"{HOME}/client/target.qml"],
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+for _ in range(60):
+    if '"class"' in inn("hyprctl", "clients", "-j").stdout: break
+    time.sleep(.25)
+time.sleep(2)
+w, h, native = grab("native")
+p0 = programs()
+
+open(HOME + "/pass-off", "w").close()
+r = inn("env", f"XDG_STATE_HOME={state_home}", "CRT_TUBES_ANYWAY=1", "python3", CRT, "tubes")
+print("  crt tubes:", (r.stdout + r.stderr).strip().splitlines()[-1][:90], flush=True)
+_, _, today = grab("today")
+inn("hyprctl", "eval", 'hl.config({ decoration = { screen_shader = "" } })')
+os.unlink(HOME + "/pass-off")
+
+# The pointer is drawn differently by design: under the warp today, over it here.
+cx, cy, R = w / 2, h / 2, 70
+mean, worst, big = compare(native, today, w, h, lambda x, y: abs(x-cx) < R and abs(y-cy) < R)
+verdict(mean < 1.0 and big < 0.5, f"native matches today's shader: mean {mean:.3f}/255, worst {worst}, {big:.3f}% of pixels off by more than 6")
+
+publish({"TUBE_K1": e["TUBE_K1"] * 2})
+_, _, turned = grab("knob-turned")
+verdict(compare(native, turned, w, h)[0] > 0.2, "turning a knob changes the picture")
+publish({"SCAN": 0.0, "GLOW": 0.0})
+_, _, off = grab("knob-scan-off")
+verdict(compare(native, off, w, h)[0] > 0.2, "and so does the scanline dial")
+publish({"TRACKING": 1.0, "TRACK_REST": 0.0}, animated=1)     # no rest, so the band is always up
+_, _, t1 = grab("clock-1"); time.sleep(2.5); _, _, t2 = grab("clock-2")
+verdict(compare(t1, t2, w, h)[0] > 0.02, "the clock moves the picture")
+p1 = programs()
+verdict(p0 == p1 == 1, f"none of that compiled anything: {p1} program, built on the first frame")
+publish()
+subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/target.qml"])
+print("FAILED" if fails else "PROVED", flush=True)
+sys.exit(1 if fails else 0)

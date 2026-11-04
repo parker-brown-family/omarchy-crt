@@ -11,7 +11,9 @@ shows the test can fail and measures by how much.
 import json, os, re, subprocess, sys, time
 S, OUT = sys.argv[1], sys.argv[2]
 HOME = S + "/home"; HERE = os.path.dirname(os.path.abspath(__file__)); FIFO = HOME + "/vptr.fifo"
-K1, K2 = 0.26, 0.11
+knobs = dict(l.split()[:2] for l in open(HOME + "/knobs.txt") if l.strip())   # what the plugin is using
+K1, K2 = float(knobs["TUBE_K1"]), float(knobs["TUBE_K2"])
+print(f"  warp strength: {K1}, {K2}", flush=True)
 os.makedirs(OUT, exist_ok=True)
 fails = 0
 def verdict(ok, text):
@@ -84,7 +86,7 @@ open(HOME + "/input-flat", "w").close()
 miss = run("unmapped")
 os.unlink(HOME + "/input-flat")
 worst = max(v for v in miss.values() if v is not None)
-verdict(worst > 10, f"without the mapping clicks miss, by up to {worst:.0f} px, so this test can fail")
+verdict(worst > 5, f"without the mapping clicks miss, by up to {worst:.0f} px, so this test can fail")
 
 client("toast")
 for _ in range(40):

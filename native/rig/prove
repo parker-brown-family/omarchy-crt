@@ -57,7 +57,7 @@ def inside(x, y, pad=0):
     return any(cx - pad <= x < cx + cw + pad and cy - pad <= y < cy + ch + pad for cx, cy, cw, ch in CARDS)
 
 open(HOME + "/keep-drawing", "w").close()
-for name in ("tile", "tile2", "toast"):
+for name in ("tile", "tile2", "toast", "target"):
     stop(name)
 time.sleep(1)
 client("tile"); settle(1, 0)
