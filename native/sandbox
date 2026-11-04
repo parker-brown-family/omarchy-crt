@@ -7,14 +7,14 @@
 # live Wayland socket), and no input of any kind. The GPU's render node is the
 # only device passed in.
 #
-# A core limit of 1 is the one value the kernel honours for a piped core_pattern. It
-# skips the dump entirely, and that matters: a dump reaches omarchy-crash-watch, which
-# raises a "Process crashed" toast on the live desktop. A limit of 0 would not stop it.
+# Crash reporting has to be sealed as well: see rig/nodump.c.
 #
 #   native/sandbox <state-dir> <command...>
 set -euo pipefail
 state="$1"; shift
 mkdir -p "$state/run" "$state/home"
+here="$(cd "$(dirname "$0")" && pwd)"
+[[ "$state/home/nodump.so" -nt "$here/rig/nodump.c" ]] || gcc -shared -fPIC -O1 -o "$state/home/nodump.so" "$here/rig/nodump.c"
 gpu=()
 for d in /dev/dri/renderD128 /dev/nvidia-caps /dev/nvidia0 /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools; do
   [[ -e $d ]] && gpu+=(--dev-bind "$d" "$d")
@@ -27,4 +27,4 @@ exec bwrap --ro-bind / / --dev /dev "${gpu[@]}" --proc /proc \
   --setenv XDG_RUNTIME_DIR /run/user/1000 --setenv XDG_CONFIG_HOME "$state/home/.config" \
   --setenv XDG_CACHE_HOME "$state/home/.cache" --setenv XDG_STATE_HOME "$state/home/.state" \
   --setenv LIBSEAT_BACKEND noop --setenv XDG_SESSION_TYPE wayland \
-  bash -c 'ulimit -c 1; exec "$@"' sandbox "$@"
+  --setenv LD_PRELOAD "$state/home/nodump.so" "$@"
