@@ -6,6 +6,10 @@ pkill -f "[H]yprland --config $S" 2>/dev/null || pkill -f "[H]yprland --config .
 sleep 1
 rm -rf "$S/run/hypr" "$S"/run/wayland-*; mkdir -p "$S/run/hypr" "$S/home"
 cp "$here/rig/hypr.lua" "$S/home/hypr.lua"
+# CRT_SEAT is lines of "NAME MODE SCALE TRANSFORM X Y"; the default is one plain monitor.
+echo "${CRT_SEAT:-HEADLESS-1 1600x900@60 1 0 0 0}" | while read -r name mode scale tf x y; do
+  echo "hl.monitor({ output = \"$name\", mode = \"$mode\", position = \"${x}x${y}\", scale = $scale, transform = $tf })" >>"$S/home/hypr.lua"
+done
 g++ -shared -fPIC -O1 -std=c++23 -o "$S/home/headless-gpu.so" "$here/rig/headless-gpu.cpp" \
   $(pkg-config --cflags --libs gbm libdrm aquamarine hyprutils pixman-1)
 setsid nohup "$here/sandbox" "$S" bash -c \
@@ -18,5 +22,7 @@ cat >"$S/in" <<IN
 exec $here/sandbox $S env WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE=$sig "\$@"
 IN
 chmod +x "$S/in"
-sleep 1; timeout 5 "$S/in" hyprctl output create headless HEADLESS-1 >/dev/null; sleep 1
-timeout 5 "$S/in" hyprctl monitors -j | python3 -c 'import json,sys;print("seat up:",[(m["name"],m["width"],m["height"]) for m in json.load(sys.stdin)])'
+sleep 1
+echo "${CRT_SEAT:-HEADLESS-1}" | while read -r name _; do timeout 5 "$S/in" hyprctl output create headless "$name" >/dev/null; done
+sleep 1
+timeout 5 "$S/in" hyprctl monitors -j | python3 -c 'import json,sys;print("seat up:",[(m["name"],m["width"],m["height"],m["scale"],m["transform"]) for m in json.load(sys.stdin)])'

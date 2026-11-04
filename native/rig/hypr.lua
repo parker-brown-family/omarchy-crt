@@ -1,5 +1,4 @@
 -- The test seat's whole config. One output, no animation, nothing of Omarchy's.
-hl.monitor({ output = "HEADLESS-1", mode = "1600x900@60", position = "0x0", scale = 1 })
 hl.config({
   animations = { enabled = false },
   misc = { disable_hyprland_logo = true, disable_splash_rendering = true, force_default_wallpaper = 0, background_color = 0xff101820 },

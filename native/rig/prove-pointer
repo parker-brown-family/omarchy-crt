@@ -8,7 +8,7 @@ every click lands on its target, a card takes a click where it is drawn, a point
 beside a card that maps under it still reaches the tile, and turning the mapping off misses, which
 shows the test can fail and measures by how much.
 """
-import os, re, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 S, OUT = sys.argv[1], sys.argv[2]
 HOME = S + "/home"; HERE = os.path.dirname(os.path.abspath(__file__)); FIFO = HOME + "/vptr.fifo"
 K1, K2 = 0.26, 0.11
@@ -50,16 +50,26 @@ except OSError: pass
 for name in ("tile", "tile2", "toast", "target"):
     subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/{name}.qml"])
 time.sleep(1)
-spawn([HOME + "/vptr", FIFO], HOME + "/vptr.log"); client("target")
+mons = json.loads(subprocess.run([S + "/in", "hyprctl", "monitors", "-j"], capture_output=True, text=True).stdout)
+def logical(m):
+    w, h = m["width"] / m["scale"], m["height"] / m["scale"]
+    return (h, w) if m["transform"] % 2 else (w, h)
+MON = next(m for m in mons if m["focused"])
+LW, LH = logical(MON); MX, MY = MON["x"], MON["y"]
+EW = max(m["x"] + logical(m)[0] for m in mons); EH = max(m["y"] + logical(m)[1] for m in mons)
+print(f"  monitor {MON['name']} {MON['width']}x{MON['height']} scale {MON['scale']} transform {MON['transform']}: logical {LW:.0f}x{LH:.0f} at {MX},{MY}", flush=True)
+subprocess.run(["pkill", "-f", f"[v]ptr {FIFO}"]); time.sleep(.2)
+try: os.unlink(FIFO)
+except OSError: pass
+spawn([HOME + "/vptr", FIFO, str(round(EW)), str(round(EH))], HOME + "/vptr.log"); client("target")
 for _ in range(60):
     c = subprocess.run([S + "/in", "hyprctl", "clients", "-j"], capture_output=True, text=True).stdout
     if '"class"' in c and os.path.exists(FIFO): break
     time.sleep(0.25)
-import json
 win = json.loads(subprocess.run([S + "/in", "hyprctl", "clients", "-j"], capture_output=True, text=True).stdout)[0]
 X, Y = win["at"]; W, H = win["size"]
 print(f"  tile at {X},{Y} size {W}x{H}", flush=True)
-TARGETS = {"top left": (110, 90), "bottom left": (110, 770), "bottom right": (1450, 770), "centre": (780, 430)}
+TARGETS = {"top left": (.07*W, .105*H), "bottom left": (.07*W, .895*H), "bottom right": (.93*W, .895*H), "centre": (.5*W, .5*H)}
 def run(label):
     misses = {}
     for name, (tx, ty) in TARGETS.items():
@@ -81,22 +91,23 @@ for _ in range(40):
     if "omarchy-notifications" in subprocess.run([S + "/in", "hyprctl", "layers", "-j"], capture_output=True, text=True).stdout: break
     time.sleep(0.25)
 time.sleep(1.5)
-got = click_at(1350, 80, "toast")
-verdict(got is not None and abs(float(got[1]) - 1350) <= 2 and abs(float(got[2]) - 80) <= 2,
+CX, CY = LW - 250, 80                  # toast.qml: right-aligned, 40 in, 420 wide
+got = click_at(MX + CX, MY + CY, "toast")
+verdict(got is not None and abs(float(got[1]) - CX) <= 2 and abs(float(got[2]) - CY) <= 2,
         f"a flat card takes a click where it is drawn: {got}")
 # Just left of the card column, where the mapping carries the position under a
 # card. The pointer is not on a card, so the tile must get it, at the mapped place.
-px, py = 1132, 80
+px, py = MX + LW - 460 - 2, MY + 80
 sx, sy = warp(((px - X) / W, (py - Y) / H))
 sx, sy = X + sx * W, Y + sy * H
-verdict(sx > 1140, f"this point really does map under the column ({px} goes to {sx:.0f}; cards start at 1140)")
+verdict(sx > MX + LW - 460, f"this point really does map under the column ({px:.0f} goes to {sx:.0f}; cards start at {MX + LW - 460:.0f})")
 n = len(clicks("toast"))
 got = click_at(px, py, "target")
 ok = got is not None and len(clicks("toast")) == n and abs(float(got[1]) + X - sx) <= 3 and abs(float(got[2]) + Y - sy) <= 3
 verdict(ok, f"beside a card the click reaches the tile, not the card: {got}")
-lx, ly = unwarp((110 / W, 90 / H))
+lx, ly = unwarp((.07, .105))
 send(f"move {round(X + lx * W)} {round(Y + ly * H)}"); time.sleep(0.6)
-subprocess.run([HERE + "/shot", S, OUT + "/5-pointer-on-target.png"], capture_output=True, timeout=15)
+subprocess.run([HERE + "/shot", S, OUT + "/5-pointer-on-target.png"], capture_output=True, timeout=15, env={**os.environ, "SHOT_MONITOR": MON["name"]})
 for name in ("target", "toast"):
     subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/{name}.qml"])
 print("FAILED" if fails else "PROVED", flush=True)

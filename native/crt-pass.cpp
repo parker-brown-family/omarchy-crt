@@ -7,6 +7,7 @@
 // compositor every frame, so a layout change never compiles anything.
 #include <GLES3/gl32.h>
 #include <algorithm>
+#include <map>
 #include <cmath>
 #include <fstream>
 #include <stdexcept>
@@ -20,6 +21,7 @@
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/pass/PassElement.hpp>
 #include <hyprland/src/output/Monitor.hpp>
+#include <hyprland/src/helpers/math/Math.hpp>
 #include <hyprland/src/state/MonitorState.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
@@ -97,10 +99,13 @@ static GLuint build() {
     return p;
 }
 
+// One scratch copy per framebuffer size, so two monitors do not reallocate every
+// frame. The program and the empty vertex array are shared.
 struct SScratch {
-    GLuint tex = 0, fb = 0, prog = 0, vao = 0;
-    int    w = 0, h = 0;
-} static g;
+    GLuint tex = 0, fb = 0;
+};
+static std::map<std::pair<int, int>, SScratch> g_scratch;
+static GLuint                                  g_prog = 0, g_vao = 0;
 
 class CCrtPass : public IPassElement {
   public:
@@ -126,41 +131,40 @@ class CCrtPass : public IPassElement {
 
         glActiveTexture(GL_TEXTURE0);
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &tex);
-        if (!g.prog) {
-            g.prog = build();
-            glGenVertexArrays(1, &g.vao);
+        if (!g_prog) {
+            g_prog = build();
+            glGenVertexArrays(1, &g_vao);
         }
-        if (g.w != w || g.h != h) {
-            if (g.tex) { glDeleteTextures(1, &g.tex); glDeleteFramebuffers(1, &g.fb); }
-            glGenTextures(1, &g.tex);
-            glBindTexture(GL_TEXTURE_2D, g.tex);
+        auto& sc = g_scratch[{w, h}];
+        if (!sc.tex) {
+            glGenTextures(1, &sc.tex);
+            glBindTexture(GL_TEXTURE_2D, sc.tex);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glGenFramebuffers(1, &g.fb);
-            glBindFramebuffer(GL_FRAMEBUFFER, g.fb);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g.tex, 0);
-            g.w = w; g.h = h;
+            glGenFramebuffers(1, &sc.fb);
+            glBindFramebuffer(GL_FRAMEBUFFER, sc.fb);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sc.tex, 0);
         }
 
         // Never sample the attachment being drawn to: the lower scene is copied first.
         glDisable(GL_SCISSOR_TEST);
         glBindFramebuffer(GL_READ_FRAMEBUFFER, target);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g.fb);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, sc.fb);
         glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
         glBindFramebuffer(GL_FRAMEBUFFER, target);
 
         glDisable(GL_BLEND);
-        glUseProgram(g.prog);
-        glBindVertexArray(g.vao);
-        glBindTexture(GL_TEXTURE_2D, g.tex);
-        glUniform1i(glGetUniformLocation(g.prog, "tex"), 0);
-        glUniform2f(glGetUniformLocation(g.prog, "res"), w, h);
-        glUniform1i(glGetUniformLocation(g.prog, "count"), (int)m_rects.size());
+        glUseProgram(g_prog);
+        glBindVertexArray(g_vao);
+        glBindTexture(GL_TEXTURE_2D, sc.tex);
+        glUniform1i(glGetUniformLocation(g_prog, "tex"), 0);
+        glUniform2f(glGetUniformLocation(g_prog, "res"), w, h);
+        glUniform1i(glGetUniformLocation(g_prog, "count"), (int)m_rects.size());
         if (!m_rects.empty())
-            glUniform4fv(glGetUniformLocation(g.prog, "rects"), (int)m_rects.size(), m_rects[0].data());
+            glUniform4fv(glGetUniformLocation(g_prog, "rects"), (int)m_rects.size(), m_rects[0].data());
         glDrawArrays(GL_TRIANGLES, 0, 3);
 
         glBindTexture(GL_TEXTURE_2D, tex);
@@ -187,7 +191,12 @@ class CDump : public IPassElement {
     bool        disableSimplification() override { return true; }
     std::vector<UP<IPassElement>> draw() override {
         const std::string home = getenv("HOME");
-        if (access((home + "/dump-now").c_str(), F_OK) != 0) return {};
+        std::ifstream     want(home + "/dump-now");
+        if (!want) return {};
+        std::string name;
+        want >> name;     // empty means any monitor
+        auto m = g_pHyprRenderer->m_renderData.pMonitor.lock();
+        if (!name.empty() && (!m || m->m_name != name)) return {};
         GLint vp[4] = {}, target = 0;
         glGetIntegerv(GL_VIEWPORT, vp);
         glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &target);
@@ -206,9 +215,11 @@ static std::vector<std::array<float, 4>> tubes(PHLMONITOR m) {
     for (auto const& w : Desktop::windowState()->windows()) {
         if (!w->m_isMapped || w->isHidden() || w->m_monitor.lock() != m || out.size() >= 24)
             continue;
-        const auto pos = (w->positionAnimation()->value() - m->m_position) * m->m_scale;
-        const auto sz  = w->sizeAnimation()->value() * m->m_scale;
-        out.push_back(std::array<float, 4>{(float)pos.x, (float)pos.y, (float)sz.x, (float)sz.y});
+        // The framebuffer is in the panel's own orientation, not the rotated one a
+        // person sees. Only the rect turns: the warp is symmetric in x and y.
+        CBox box = {(w->positionAnimation()->value() - m->m_position) * m->m_scale, w->sizeAnimation()->value() * m->m_scale};
+        box.transform(Math::wlTransformToHyprutils(Math::invertTransform(m->m_transform)), m->m_transformedSize.x, m->m_transformedSize.y);
+        out.push_back(std::array<float, 4>{(float)box.x, (float)box.y, (float)box.w, (float)box.h});
     }
     return out;
 }
@@ -321,4 +332,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     return {"crt-pass", "CRT below top and overlay layers (proof of concept)", "Parker Brown", "0.0.1"};
 }
 
-APICALL EXPORT void PLUGIN_EXIT() { g_stage.reset(); g_mapped.reset(); }
+APICALL EXPORT void PLUGIN_EXIT() { 
+    g_stage.reset();
+    g_mapped.reset();
+    // Hyprland keeps a frame's pass elements until the next frame begins, and would
+    // then destroy ours with code that has been unloaded.
+    g_pHyprRenderer->m_renderPass.clear();
+}

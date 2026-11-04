@@ -18,7 +18,7 @@ ShellRoot {
         for (var x = 0; x <= width; x += 50) { c.beginPath(); c.moveTo(x, 0); c.lineTo(x, height); c.stroke() }
         for (var y = 0; y <= height; y += 50) { c.beginPath(); c.moveTo(0, y); c.lineTo(width, y); c.stroke() }
         c.strokeStyle = "#ff5a3c"; c.fillStyle = "#ff5a3c"; c.lineWidth = 3
-        var T = [[110, 90], [110, 770], [1450, 770], [780, 430]]
+        var T = [[0.07 * width, 0.105 * height], [0.07 * width, 0.895 * height], [0.93 * width, 0.895 * height], [0.5 * width, 0.5 * height]]
         for (var i = 0; i < T.length; i++) {
           c.beginPath(); c.arc(T[i][0], T[i][1], 18, 0, 6.3); c.stroke()
           c.fillRect(T[i][0] - 2, T[i][1] - 2, 4, 4)

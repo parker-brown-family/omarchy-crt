@@ -32,13 +32,15 @@ int main(int argc, char** argv) {
     struct zwlr_virtual_pointer_v1* p = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(mgr, seat);
     wl_display_roundtrip(d);
     mkfifo(argv[1], 0600);
+    unsigned ew = 1600, eh = 900;     // the layout's logical size, which absolute motion is a fraction of
+    if (argc > 3) sscanf(argv[2], "%u", &ew), sscanf(argv[3], "%u", &eh);
     char line[64];
     for (;;) {
         FILE* f = fopen(argv[1], "r");
         while (f && fgets(line, sizeof line, f)) {
             unsigned x, y;
             if (sscanf(line, "move %u %u", &x, &y) == 2) {
-                zwlr_virtual_pointer_v1_motion_absolute(p, now(), x, y, 1600, 900);
+                zwlr_virtual_pointer_v1_motion_absolute(p, now(), x, y, ew, eh);
                 zwlr_virtual_pointer_v1_frame(p);
             } else if (!strncmp(line, "click", 5)) {
                 zwlr_virtual_pointer_v1_button(p, now(), BTN_LEFT, 1);

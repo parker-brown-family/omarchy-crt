@@ -7,7 +7,7 @@ from a frame with no toast, so the bug cannot hide in it); a new tile and a toas
 cost no shader compile; and moving the pass to after the layers, where today's
 screen shader sits, breaks the oracle, which shows this test can fail.
 """
-import os, struct, subprocess, sys, time, zlib
+import json, os, subprocess, sys, time
 S, OUT = sys.argv[1], sys.argv[2]
 HOME = S + "/home"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -34,13 +34,24 @@ def stop(name):
     subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/{name}.qml"])
 def shot(name):
     time.sleep(1.2)
-    out = subprocess.run([HERE + "/shot", S, f"{OUT}/{name}.png"], capture_output=True, text=True, timeout=15)
+    out = subprocess.run([HERE + "/shot", S, f"{OUT}/{name}.png"], capture_output=True, text=True, timeout=15,
+                         env={**os.environ, "SHOT_MONITOR": MON["name"]})
     if out.returncode: sys.exit(out.stderr)
     meta = out.stdout.split()
     w, h = int(meta[0]), int(meta[1])
     programs = int(meta[3].split("=")[1])
     return open(HOME + "/frame.rgba", "rb").read(), w, h, programs
-CARDS = [(1600 - 40 - 420, 40 + i * 88, 420, 78) for i in range(3)]   # toast.qml's own numbers
+MON = next(m for m in json.loads(subprocess.run([S + "/in", "hyprctl", "monitors", "-j"], capture_output=True, text=True).stdout) if m["focused"])
+SC, TF, FW = MON["scale"], MON["transform"], MON["width"]
+LW = (MON["height"] if TF % 2 else MON["width"]) / SC
+print(f"  monitor {MON['name']} {MON['width']}x{MON['height']} scale {SC} transform {TF}", flush=True)
+def to_fb(x, y):
+    """A logical point in the monitor, as a framebuffer pixel. Only 0 and 3 are in use."""
+    return (x * SC, y * SC) if TF == 0 else (FW - y * SC, x * SC)
+def box(x, y, w, h):
+    (ax, ay), (bx, by) = to_fb(x, y), to_fb(x + w, y + h)
+    return (min(ax, bx), min(ay, by), abs(bx - ax), abs(by - ay))
+CARDS = [box(LW - 40 - 420, 40 + i * 88, 420, 78) for i in range(3)]   # toast.qml's own numbers
 ALPHA, CARD = 0.62, (0.05, 0.05, 0.07)
 def inside(x, y, pad=0):
     return any(cx - pad <= x < cx + cw + pad and cy - pad <= y < cy + ch + pad for cx, cy, cw, ch in CARDS)
@@ -57,13 +68,19 @@ with_toast, _, _, p1 = shot("2-toast-flat-over-curve")
 changed = sum(1 for y in range(0, h, 2) for x in range(0, w, 2)
               if not inside(x, y, 4) and base[(y*w+x)*4:(y*w+x)*4+3] != with_toast[(y*w+x)*4:(y*w+x)*4+3])
 verdict(changed == 0, f"outside the cards the toast changed {changed} sampled pixels")
+at = lambda f, x, y: f[(int(y)*w+int(x))*4:(int(y)*w+int(x))*4+3]
+moved = sum(at(base, cx+cw*.8, cy+ch*.5) != at(with_toast, cx+cw*.8, cy+ch*.5) for cx, cy, cw, ch in CARDS)
+verdict(moved == 3, f"and all three cards are where this test thinks they are ({moved})")
 
 def oracle(frame):
     """Worst and mean error between a frame and card-over-curved-tile, in 0-255."""
     errs = []
     for cx, cy, cw, ch in CARDS:
-        for y in range(cy + 6, cy + ch - 6, 3):
-            for x in range(cx + 300, cx + cw - 10, 3):    # right of the text
+        for gy in range(1, 12):
+            for gx in range(1, 12):
+                # the end of the card with no text in it, along the card's own length
+                fx, fy = (.74 + gx * .02, .1 + gy * .07) if TF == 0 else (.1 + gx * .07, .74 + gy * .02)
+                x, y = int(cx + fx * cw), int(cy + fy * ch)
                 i = (y*w+x)*4
                 for c in range(3):
                     want = ALPHA * CARD[c] * 255 + (1 - ALPHA) * base[i+c]

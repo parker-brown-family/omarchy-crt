@@ -6,7 +6,7 @@ home = S + "/home"
 for f in ("frame.rgba", "frame.txt"):
     try: os.unlink(f"{home}/{f}")
     except OSError: pass
-open(f"{home}/dump-now", "w").close()
+open(f"{home}/dump-now", "w").write(os.environ.get("SHOT_MONITOR", ""))
 for _ in range(100):
     if os.path.exists(f"{home}/frame.txt") and not os.path.exists(f"{home}/dump-now"): break
     time.sleep(0.05)
