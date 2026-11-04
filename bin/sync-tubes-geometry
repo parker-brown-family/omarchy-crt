@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerate crt/tubes-geometry from the theme's td-tubes.
 
-omarchy-crt needs one thing from omarchy-terminal-delight-theme: the code that
+omarchy-crt needs one thing from omarchy-terminal-delight-tools: the code that
 measures every visible surface and emits its rectangle — 400-odd lines of
 hard-won jq covering monitor rotation, scale, layer surfaces, the fullscreen
 occlusion rule and the whole-monitor budget. Reimplementing it would fork the
@@ -32,7 +32,7 @@ OUT = ROOT / "crt/tubes-geometry"
 # A maintainer tool: it regenerates the vendored copy FROM the theme
 UPSTREAM = Path(os.environ.get(
     "TD_TUBES_UPSTREAM",
-    Path.home() / "Work/omarchy-terminal-delight-theme/bin/td-tubes"))
+    Path.home() / "Work/omarchy-terminal-delight-tools/bin/td-tubes"))
 
 if not UPSTREAM.exists():
     sys.exit(f"sync-tubes-geometry: upstream not found at {UPSTREAM}")
@@ -62,7 +62,7 @@ out = f"""#!/usr/bin/env bash
 # bin/td-tubes and re-run the sync; this header records where the copy came
 # from so staleness is checkable rather than a feeling.
 #
-#   upstream: omarchy-terminal-delight-theme/bin/td-tubes @ {commit}
+#   upstream: omarchy-terminal-delight-tools/bin/td-tubes @ {commit}
 #
 # This file is SOURCE-ONLY: it defines tubes_json / cap / emit_block / describe
 # and friends, and nothing here runs td-tubes' command line, its baker or its

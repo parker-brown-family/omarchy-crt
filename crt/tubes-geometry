@@ -3,7 +3,7 @@
 # bin/td-tubes and re-run the sync; this header records where the copy came
 # from so staleness is checkable rather than a feeling.
 #
-#   upstream: omarchy-terminal-delight-theme/bin/td-tubes @ 862f3ac
+#   upstream: omarchy-terminal-delight-tools/bin/td-tubes @ 6b5562d
 #
 # This file is SOURCE-ONLY: it defines tubes_json / cap / emit_block / describe
 # and friends, and nothing here runs td-tubes' command line, its baker or its
@@ -418,11 +418,15 @@ tubes_json() {
             # neighbouring map. It claims them flat instead. (No apostrophes in
             # here: this jq program is single-quoted and one would end it.)
             curv:  (if .class == "terminal-delight" then 0 else 1 end),
+            floating: .floating,
             fh: .focusHistoryID } ]
-        | sort_by(.fh) ) as $client_tubes
-    # Layers draw above windows, so they claim first — level 3 over level 2,
-    # then clients most-recently-focused first. tube_at takes the first hit, and
-    # the order only ever means anything within one monitor.
+        # Floating windows stay above tiles even when a tile has focus.
+        # Focus history only orders windows within the same stacking group.
+        | sort_by((if .floating then 0 else 1 end), .fh)
+        | map(del(.floating)) ) as $client_tubes
+    # Layers claim first, level 3 over level 2, then floating windows, then tiles.
+    # Within each client group the most recently focused claims first.
+    # tube_at takes the first hit; ordering matters only within one monitor.
     | ($layer_tubes | sort_by(-.lvl) | map(del(.lvl))) as $lt
     # CLAIMING WAS ONLY HALF THE RULE. Ordering decides who OWNS a pixel; it does
     # nothing about where the MAP of a tube reaches. A gather maps its whole rect

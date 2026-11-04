@@ -167,8 +167,8 @@ const int   TUBE_QUIET[TUBE_COUNT] = int[TUBE_COUNT](0);
 // exactly like a live one, and removing them would be the only visible change.
 
 // Which tube owns this pixel, or -1 for bare desktop. td-tubes emits the list
-// most-recently-focused first and the first hit wins, so a window stacked over
-// a tile takes the pixels it covers instead of being bent by the tile beneath.
+// floating windows before tiles, then focus order within each group. The first
+// hit wins, so an inactive floating window keeps its pixels above the tiles.
 int tube_at(vec2 px) {
 #if TUBE_COUNT > 0
     for (int i = 0; i < TUBE_COUNT; i++) {

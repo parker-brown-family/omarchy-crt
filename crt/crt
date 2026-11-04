@@ -46,6 +46,7 @@ that would otherwise cover it — until you turn that macro again.
 """
 
 import json
+import math
 import os
 import re
 import shlex
@@ -555,7 +556,7 @@ def hypr_query(what):
         except (OSError, ValueError):
             pass
     try:
-        return json.loads(hyprctl(what, "-j") or "")
+        return json.loads(hyprctl(*what.split(), "-j") or "")
     except ValueError:
         return None
 
@@ -667,11 +668,39 @@ def claimed_layers(layers):
             for mon, doc in layers.items()}
 
 
+def framed_clients(clients):
+    """Include a float's compositor border before scaling/rotating its rect.
+    Tiled frames stay unchanged: their neighbours already bound the tile map.
+    """
+    framed = []
+    for c in clients:
+        if not (c.get("floating") and c.get("mapped") and not c.get("hidden")) or c.get("fullscreen") == 2:
+            framed.append(c)
+            continue
+        address = c["address"]
+        decoration = hypr_query(f"getprop address:{address} decorate")
+        if not isinstance(decoration, dict) or not isinstance(decoration.get("decorate"), bool):
+            return None
+        if not decoration["decorate"]:
+            framed.append(c)
+            continue
+        prop = hypr_query(f"getprop address:{address} border_size")
+        border = prop.get("border_size") if isinstance(prop, dict) else None
+        if type(border) not in (int, float) or not math.isfinite(border) or border < 0:
+            return None
+        framed.append({**c, "at": [v - border for v in c["at"]],
+                       "size": [v + 2 * border for v in c["size"]]})
+    return framed
+
+
 def tube_rows():
     """Every surface that gets a tube, as dicts, or None when it cannot be known."""
     program = geometry_program()
     mons, clients = hypr_query("monitors"), hypr_query("clients")
     if program is None or mons is None or clients is None or not shutil.which("jq"):
+        return None
+    clients = framed_clients(clients)
+    if clients is None:
         return None
     layers = claimed_layers(hypr_query("layers"))
     r = subprocess.run(
