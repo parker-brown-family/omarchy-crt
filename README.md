@@ -121,7 +121,9 @@ crt native on
 
 It loads into the running session only, and nothing goes in your config, so a reboot or a crash comes back on the screen shader. `crt native off` takes it out. The tray, the knobs and the hotkey work the same either way. The bar and overlays are drawn after the CRT, so they lose the scanlines and glow.
 
-It runs inside Hyprland, so a bug can take your session down. It is built for one exact Hyprland version and refuses any other, so after a Hyprland update run `native/build` again. It isn't part of the Omarchy plugin install.
+It runs inside Hyprland, so a bug can take your session down. It is built against one Hyprland commit and refuses a different one. That check can't see a change in a library Hyprland depends on, so run `native/build` again after any Hyprland or dependency update. It isn't part of the Omarchy plugin install.
+
+Building it needs the Hyprland headers (`pkg-config hyprland`) and g++. The plugin is built on your machine from the source here, and no binary ships in this repository. Hyprland runs it with your full user permissions, unsandboxed, so read `native/crt-pass.cpp` before you load it.
 
 ## How it works, and the two things worth knowing
 
@@ -254,9 +256,11 @@ omarchy plugin remove brownfamilysports.crt --yes
 ```
 
 `crt uninstall` is the tidy exit and takes the Hyprland wiring, the theme-set
-hook, the systemd unit and the guard back out itself. It removes only files that
-still carry this plugin's marker; anything that has since become somebody else's
-is left where it is and named on stderr.
+hook, the systemd unit and the guard back out itself, each only if it still
+carries this plugin's marker; anything that has since become somebody else's is
+left where it is and named on stderr. It also unloads the native pass if it is on
+and deletes the native builds in this plugin's own state directory. If Hyprland
+will not unload the pass, it stops there and removes nothing.
 
 **You do not have to remember to run it.** A screen shader has to be named in
 Hyprland's config, a theme switch has to reach omarchy's hook directory and a
@@ -274,6 +278,13 @@ systemd's own `ExecCondition=`, the theme hook as its first line. When the
 plugin is decisively gone, or a different plugin has taken its pathname, the
 guard removes every registration this plugin made, itself included, and refuses
 to run. A pathname recreated later by something else is never executed.
+
+The native pass is the one thing the guard cannot reach straight away, because it
+draws from inside Hyprland and nothing of ours runs at removal. If you remove the
+plugin with it on, the warp stays until the next thing that reaches the guard (the
+hotkey or a theme switch), which unloads it, or until you log out. If the unload
+fails, the guard leaves everything in place and tries again next time. `crt native
+off` before removing avoids the wait.
 
 Decisively is doing work in that sentence. A checkout that is *there but
 unreadable* is what a half-finished `omarchy plugin update` looks like from the

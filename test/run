@@ -53,6 +53,7 @@ mkdir -p "$HOME/.config/hypr" "$XDG_STATE_HOME/omarchy/current/theme"
 # would make the test's verdict depend on the developer's desktop.
 mkdir -p "$SANDBOX/bin"
 export HYPRCTL_LOG="$SANDBOX/hyprctl.log"
+export PLUGIN_LOADED="$SANDBOX/plugin.loaded" PLUGIN_STUCK="$SANDBOX/plugin.stuck"
 export SHADER_STATE="$SANDBOX/screen_shader"
 export TD_TUBES_STATE="$SANDBOX/td-tubes-active"
 export DAMAGE_STATE="$SANDBOX/damage_tracking"
@@ -68,7 +69,15 @@ echo "$*" >>"$HYPRCTL_LOG"
 case "$1" in
   configerrors) echo "no errors" ;;
   plugin)
-    if [[ "$2" == load && -f "$PLUGIN_REFUSE" ]]; then echo "Plugin could not be loaded"; else echo ok; fi ;;
+    case "$2" in
+      load)
+        if [[ -f "$PLUGIN_REFUSE" ]]; then echo "Plugin could not be loaded"
+        else touch "$PLUGIN_LOADED"; echo ok; fi ;;
+      unload) [[ -f "$PLUGIN_STUCK" ]] || rm -f "$PLUGIN_LOADED"; echo ok ;;
+      list)
+        if [[ -f "$PLUGIN_LOADED" ]]; then echo "Plugin crt-pass by Parker Brown:"
+        else echo "no plugins loaded"; fi ;;
+    esac ;;
   getoption)
     if [[ "$2" == "debug:damage_tracking" ]]; then echo "int: $(cat "$DAMAGE_STATE")"
     else echo "str: $(cat "$SHADER_STATE")"; echo "set: true"; fi ;;
@@ -1086,6 +1095,145 @@ check "and leaves no flag" "$([[ -e $FLAG ]] && echo y || echo n)" "n"
 check "and the shader stays" "$(grep -c 'crt-glass' "$SHADER_STATE")" "1"
 rm -f "$PLUGIN_REFUSE"
 
+# Removal, with the pass on. It draws from inside Hyprland, so nothing else stops it.
+LIVE="$RUNDIR/hypr/this-session"; mkdir -p "$LIVE"; : >"$LIVE/.socket.sock"
+unloads() { grep -c '^plugin unload' "$HYPRCTL_LOG"; }
+nat native on >/dev/null 2>&1
+BUILT="$(sed -n 2p "$FLAG")"
+: >"$HYPRCTL_LOG"
+touch "$PLUGIN_STUCK"
+nat uninstall >/dev/null 2>&1
+check "a pass that will not unload stops the uninstall" "$?" "1"
+check "and removes nothing" "$([[ -e $FLAG && -f $BUILT && -f $GUARDF ]] && echo y || echo n)" "y"
+rm -f "$PLUGIN_STUCK"
+: >"$HYPRCTL_LOG"
+env -u HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR="$RUNDIR" "$CRT" uninstall >/dev/null 2>&1
+check "uninstall unloads it, from a shell with no session" \
+  "$(grep -cxF "plugin unload $BUILT" "$HYPRCTL_LOG")" "1"
+check "and clears the flag" "$([[ -e $FLAG ]] && echo y || echo n)" "n"
+check "and deletes every build" "$(find "$NATDIR" -name '*.so' | wc -l)" "0"
+
+# A second load must not write over a build Hyprland still has mapped.
+"$CRT" install >/dev/null 2>&1
+echo built >"$NATDIR/crt-pass.so"
+nat native on >/dev/null 2>&1
+BUILT="$(sed -n 2p "$FLAG")"
+INODE="$(stat -c %i "$BUILT")"
+nat native off >/dev/null 2>&1
+nat native on >/dev/null 2>&1
+check "a second load leaves the mapped build's file alone" "$(stat -c %i "$BUILT")" "$INODE"
+nat native off >/dev/null 2>&1
+touch "$PLUGIN_STUCK"
+nat native on >/dev/null 2>&1
+nat native off >/dev/null 2>&1
+check "native off says so when the pass stays" "$?" "1"
+check "and keeps the flag" "$([[ -e $FLAG ]] && echo y || echo n)" "y"
+rm -f "$PLUGIN_STUCK"
+nat native off >/dev/null 2>&1
+
+# The same, through the guard: a plugin removed with nothing of ours running. Run
+# from a shell with no signature, because a unit or a hook may not have one.
+GONE="$SANDBOX/gone"
+GCRT="$GONE/crt/crt"
+guard() { env -u HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR="$RUNDIR" "$GUARDF" run toggle; }
+arm() {
+  rm -rf "$GONE"; mkdir -p "$GONE"; cp -r "$REPO/crt" "$REPO/manifest.json" "$GONE/"
+  XDG_RUNTIME_DIR="$RUNDIR" HYPRLAND_INSTANCE_SIGNATURE=this-session "$GCRT" install >/dev/null 2>&1
+  echo built >"$NATDIR/crt-pass.so"
+  XDG_RUNTIME_DIR="$RUNDIR" HYPRLAND_INSTANCE_SIGNATURE=this-session "$GCRT" native on >/dev/null 2>&1
+  BUILT="$(sed -n 2p "$FLAG")"
+  : >"$HYPRCTL_LOG"
+}
+arm; rm -rf "$GONE"
+guard
+check "the guard unloads a pass whose plugin has gone" \
+  "$(grep -cxF "plugin unload $BUILT" "$HYPRCTL_LOG")" "1"
+check "and clears its flag" "$([[ -e $FLAG ]] && echo y || echo n)" "n"
+check "and deletes its builds" "$(find "$NATDIR" -name '*.so' | wc -l)" "0"
+check "and removes itself last" "$([[ -f $GUARDF ]] && echo y || echo n)" "n"
+
+arm; rm -rf "$GONE"
+touch "$PLUGIN_STUCK"
+guard
+check "a pass that will not unload takes nothing down" \
+  "$([[ -e $FLAG && -f $BUILT && -f $GUARDF ]] && echo y || echo n)" "y"
+rm -f "$PLUGIN_STUCK"
+guard
+check "and the next try finishes the job" "$([[ -e $FLAG || -f $GUARDF ]] && echo y || echo n)" "n"
+
+arm; rm -rf "$GONE"
+printf 'a-dead-session\n%s\n' "$BUILT" >"$FLAG"
+guard
+check "a flag from a session that ended unloads nothing" "$(unloads)" "0"
+check "and is cleared with the rest" "$([[ -e $FLAG ]] && echo y || echo n)" "n"
+
+for bad in /tmp/crt-pass-x.so "$NATDIR/crt-pass/../../../crt-pass-x.so"; do
+  arm; rm -rf "$GONE"
+  printf 'this-session\n%s\n' "$bad" >"$FLAG"
+  guard
+  check "a flag naming $bad unloads nothing" "$(unloads)" "0"
+  rm -f "$FLAG"
+done
+
+# Half-written is not removed. Every one of these keeps the wiring and the pass.
+kept() { [[ -e $FLAG && -f $BUILT && -f $GUARDF ]] && echo y || echo n; }
+arm; : >"$GONE/manifest.json"
+guard
+check "an empty manifest disarms nothing" "$(kept)" "y"
+check "and unloads nothing" "$(unloads)" "0"
+arm; head -c 20 "$REPO/manifest.json" >"$GONE/manifest.json"
+guard
+check "a manifest cut short disarms nothing" "$(kept)" "y"
+arm; sed -i 's/"brownfamilysports.crt"/"someone.else"/' "$GONE/manifest.json"
+guard
+check "a manifest naming another plugin still disarms" "$([[ -f $GUARDF ]] && echo y || echo n)" "n"
+rm -f "$FLAG"
+
+# THE CANONICAL LINK. The guard's root is the plugin path, so these use the dev link.
+ln -sfn "$FAKEPLUG" "$PLUGDIR/brownfamilysports.crt"
+cp "$REPO/crt/crt" "$FAKEPLUG/crt/crt"
+XDG_RUNTIME_DIR="$RUNDIR" HYPRLAND_INSTANCE_SIGNATURE=this-session "$FCRT" install >/dev/null 2>&1
+mv "$FAKEPLUG" "$FAKEPLUG.moved"
+"$GUARDF" check
+check "a dangling link refuses to run" "$?" "1"
+check "and disarms nothing, because a moved checkout is not a removed one" \
+  "$([[ -f $GUARDF && -f $LUAF ]] && echo y || echo n)" "y"
+mv "$FAKEPLUG.moved" "$FAKEPLUG"
+chmod 000 "$PLUGDIR"
+"$GUARDF" check
+check "an unreadable parent refuses to run" "$?" "1"
+chmod 755 "$PLUGDIR"
+check "and disarms nothing" "$([[ -f $GUARDF && -f $LUAF ]] && echo y || echo n)" "y"
+"$FCRT" uninstall >/dev/null 2>&1
+
+# A window's title is any app's to choose, and it must not reach an argument limit.
+FAT="$SANDBOX/fat.py"
+cat >"$FAT" <<'PY'
+import importlib.machinery, importlib.util, json, sys
+ld = importlib.machinery.SourceFileLoader("crtmod", sys.argv[1])
+sp = importlib.util.spec_from_loader("crtmod", ld)
+m = importlib.util.module_from_spec(sp); ld.exec_module(m)
+mon = {"id": 0, "name": "M", "x": 0, "y": 0, "width": 1920, "height": 1080, "scale": 1.0,
+       "transform": 0, "focused": True, "activeWorkspace": {"id": 1, "name": "1"},
+       "specialWorkspace": {"id": 0, "name": ""}}
+win = {"address": "0xa", "mapped": True, "hidden": False, "visible": True, "at": [10, 40],
+       "size": [900, 900], "workspace": {"id": 1, "name": "1"}, "floating": False, "monitor": 0,
+       "class": "c", "title": "\U0001F4A5" * 40000, "fullscreen": 0, "focusHistoryID": 0,
+       "grouped": [], "pinned": False}
+m.hypr_query = lambda what: {"monitors": [mon], "clients": [win], "layers": {}}[what]
+m.framed_clients = lambda c: c
+print(len(m.tube_rows() or []))
+PY
+check "a title longer than an argument can hold still gets its tube" \
+  "$(python3 "$FAT" "$CRT" 2>&1 | tail -1)" "1"
+
+check "with no runtime directory, nothing is read from /tmp" \
+  "$(env -u XDG_RUNTIME_DIR HYPRLAND_INSTANCE_SIGNATURE=this-session "$CRT" native status)" \
+  "native pass: unknown (no Hyprland session in this shell)"
+echo built >"$NATDIR/crt-pass.so"
+check "and native on refuses by name rather than crash" \
+  "$(env -u XDG_RUNTIME_DIR HYPRLAND_INSTANCE_SIGNATURE=this-session "$CRT" native on 2>&1 | grep -c 'nowhere private')" "1"
+
 if command -v g++ >/dev/null && command -v glslangValidator >/dev/null; then
   g++ -std=c++2b -o "$SANDBOX/test-source" "$REPO/native/test-source.cpp"
   "$SANDBOX/test-source" "$TEMPLATE" >"$SANDBOX/native.frag" 2>"$SANDBOX/native.knobs"
@@ -1094,6 +1242,12 @@ if command -v g++ >/dev/null && command -v glslangValidator >/dev/null; then
   check "with every knob a uniform" \
     "$(grep -cE '^const float (TUBE_K1|SCAN|GLOW|TRACKING) ' "$SANDBOX/native.frag")" "0"
   check "and the tube arrays uniform too" "$(grep -c '^uniform vec4  TUBE_RECT' "$SANDBOX/native.frag")" "1"
+  printf 'TUBE_K1 1e39\nON 0\nANIMATED 1\nPASS foot\n' >"$SANDBOX/knobs.bad"
+  check "a value too large for a float cannot hide the lines after it" \
+    "$("$SANDBOX/test-source" "$TEMPLATE" "$SANDBOX/knobs.bad" | cut -d' ' -f1-3)" "on=0 animated=1 pass=1"
+  printf 'TUBE_K1 0.25\nTUBE_K1 1e39\nON nonsense\n' >"$SANDBOX/knobs.bad"
+  check "and a line that will not parse changes nothing" \
+    "$("$SANDBOX/test-source" "$TEMPLATE" "$SANDBOX/knobs.bad")" "on=1 animated=0 pass=0 TUBE_K1=0.25"
 else
   echo "  note g++ or glslangValidator missing, so the shader translation went unchecked"
 fi

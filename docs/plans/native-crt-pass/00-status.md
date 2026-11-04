@@ -15,7 +15,7 @@ The gates collapsed because the two approvals so far were "Keep going! <3" and "
 - [x] Slice 1 — the whole CRT look, with knobs that change live
 - [x] Slice 2 — windows own the right pixels
 - [x] Slice 3 — one owner, an off switch and a way back
-- [ ] Slice 4 — everything that can go wrong (done: drag, scroll, lock, idle, GPU cost, workspace slide, blur, the float behind a fullscreen window, the border corner in the seat. Never run: X11, recording, hotplug, special workspaces, groups, pins. Pointer lock has a guard and no real game behind it. The corner still waits on Parker's eye, in issue 9)
+- [ ] Slice 4 — everything that can go wrong (done: drag, scroll, lock, idle, GPU cost, workspace slide, blur, the float behind a fullscreen window, the border corner in the seat. Never run: X11, recording, hotplug, special workspaces, groups, pins. Pointer lock has a guard and no real game behind it. The corner still waits on Parker's eye, in issue 9. An adversarial review before the 0.2.0 marketplace update found that a second load of one build killed Hyprland; that and nine others were fixed, with no second review round. A plugin that fails halfway through its hooks at load is still untested)
 - [x] Slice 5 — your desktop, opt-in: running since 2026-11-04, Parker: "really nice"
 
 ## Notes for a fresh session

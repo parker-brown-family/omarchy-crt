@@ -1,4 +1,4 @@
-// CRT pass: proof of concept, runs only in the sealed test seat (native/rig).
+// CRT pass: the optional native path, loaded by `crt native on`.
 //
 // The screen shader runs after everything has been composited, so a toast is
 // already part of the picture it bends. This runs the same tube warp after the
@@ -96,38 +96,16 @@ static float knob(const char* name, float fallback) {
 }
 
 // knobs.txt is what `crt` publishes: "NAME value", or "NAME r g b" for a colour.
+static std::filesystem::file_time_type g_knobsSeen{};
 static void readKnobs() {
-    static std::filesystem::file_time_type seen{};
-    std::error_code                        ec;
-    const auto                             path = pluginDir() + "/knobs.txt";
-    const auto                             t    = std::filesystem::last_write_time(path, ec);
-    if (ec || t == seen)
+    std::error_code ec;
+    const auto      path = pluginDir() + "/knobs.txt";
+    const auto      t    = std::filesystem::last_write_time(path, ec);
+    if (ec || t == g_knobsSeen)
         return;
-    seen = t;
+    g_knobsSeen = t;
     std::ifstream f(path);
-    std::string   name;
-    g_passthrough.clear();
-    while (f >> name) {
-        if (name == "ANIMATED") {
-            f >> g_animated;
-            continue;
-        }
-        if (name == "ON") {
-            f >> g_on;
-            continue;
-        }
-        if (name == "PASS") {
-            f >> name;
-            g_passthrough.push_back(name);
-            continue;
-        }
-        float v[3] = {};
-        auto  it   = std::ranges::find_if(g_knobs, [&](auto const& k) { return k.name == name; });
-        for (int i = 0; i < (it == g_knobs.end() ? 1 : it->size); i++)
-            f >> v[i];
-        if (it != g_knobs.end())
-            std::copy(v, v + 3, it->value);
-    }
+    parseKnobs(f, g_knobs, g_passthrough, g_animated, g_on);
 }
 
 static std::string g_source;
@@ -143,7 +121,7 @@ static GLuint build() {
         if (!ok) {
             char l[2048] = {};
             glGetShaderInfoLog(o, sizeof l, nullptr, l);
-            std::ofstream(std::string(getenv("HOME")) + "/crt-pass.err", std::ios::app) << l << "\n";
+            std::ofstream(pluginDir() + "/crt-pass.err", std::ios::app) << l << "\n";
         }
         return o;
     };
@@ -151,8 +129,6 @@ static GLuint build() {
     glAttachShader(p, sh(GL_VERTEX_SHADER, VS));
     glAttachShader(p, sh(GL_FRAGMENT_SHADER, g_source));
     glLinkProgram(p);
-    for (auto& k : g_knobs)
-        k.loc = glGetUniformLocation(p, k.name.c_str());
     g_programs++;
     return p;
 }
@@ -164,6 +140,7 @@ struct SScratch {
 };
 static std::map<std::pair<int, int>, SScratch> g_scratch;
 static GLuint                                  g_prog = 0, g_vao = 0;
+static bool                                    g_located = false;
 
 // One surface's tube. Drawing and hit-testing both read this list, in this order,
 // so a pixel and a click can never disagree about which window owns them.
@@ -205,9 +182,14 @@ class CCrtPass : public IPassElement {
 
         glActiveTexture(GL_TEXTURE0);
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &tex);
-        if (!g_prog) {
+        if (!g_prog)
             g_prog = build();
+        if (!g_vao)
             glGenVertexArrays(1, &g_vao);
+        if (!g_located) {
+            for (auto& k : g_knobs)
+                k.loc = glGetUniformLocation(g_prog, k.name.c_str());
+            g_located = true;
         }
         auto& sc = g_scratch[{w, h}];
         if (!sc.tex) {
@@ -470,11 +452,20 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_layerHook    = hookNamed("layerSurfaceAt", "CViewHitTester::layerSurfaceAt", (void*)hkLayerAt);
     g_moveHook     = hookNamed("mouseMoveUnified", "CInputManager::mouseMoveUnified", (void*)hkMove);
     // Before anything draws, so the knob list exists when knobs.txt is first read.
+    // Hyprland keeps an unloaded plugin mapped, so a second load of one build finds these
+    // statics as they were left: the program and its scratch are still good, and the knob
+    // list has just been rebuilt with no locations and no values.
+    const auto linked = g_source;
     g_source = nativeSource();
     if (g_source.empty())
         throw std::runtime_error("crt-pass: no crt-glass.frag beside the plugin");
+    if (g_source != linked)
+        g_prog = 0;
+    g_located   = false;
+    g_knobsSeen = {};
     readKnobs();
     g_stage = Event::bus()->m_events.render.stage.listen([](eRenderStage stage) {
+#ifdef CRT_RIG
         static long seen[8] = {};
         seen[stage & 7]++;
         if (seen[stage & 7] % 30 == 1) {
@@ -482,6 +473,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
             for (long n : seen) f << n << " ";
             f << "drawn=" << g_frames << "\n";
         }
+#endif
         // Test rig: a still screen rightly draws nothing, and a capture needs a
         // frame, so a waiting request keeps the seat drawing until it is served.
         // The clock wants the same. Damaged here, not through doLater, because a

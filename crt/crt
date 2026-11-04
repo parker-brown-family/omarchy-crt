@@ -717,9 +717,10 @@ def tube_rows():
     if clients is None:
         return None
     layers = claimed_layers(hypr_query("layers"))
+    # On stdin, because window titles are any app's to choose and an argument has a limit.
     r = subprocess.run(
-        ["jq", "-nc", "--argjson", "m", json.dumps(mons), "--argjson", "c", json.dumps(clients),
-         "--argjson", "l", json.dumps({} if layers is None else layers), program],
+        ["jq", "-c", ". as {m: $m, c: $c, l: $l} | " + program],
+        input=json.dumps({"m": mons, "c": clients, "l": {} if layers is None else layers}),
         capture_output=True, text=True)
     if r.returncode != 0:
         print(f"crt: geometry failed: {r.stderr.strip()[:200]}", file=sys.stderr, flush=True)
@@ -1322,14 +1323,17 @@ NATIVE_DIR = STATE / "native"
 
 
 def native_flag():
-    return Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "omarchy-crt-native"
+    """None with no XDG_RUNTIME_DIR. /tmp is shared, so a flag there could be anyone's."""
+    run = os.environ.get("XDG_RUNTIME_DIR")
+    return Path(run) / "omarchy-crt-native" if run else None
 
 
 def native_active():
     """Does the native pass own the glass in THIS Hyprland session?"""
     sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    flag = native_flag()
     try:
-        return bool(sig) and native_flag().read_text().split("\n")[0] == sig
+        return bool(sig and flag) and flag.read_text().split("\n")[0] == sig
     except OSError:
         return False
 
@@ -1351,6 +1355,8 @@ def native_on():
     plugin = NATIVE_DIR / "crt-pass.so"
     if not plugin.exists():
         die(f"no plugin at {plugin} — build it with native/build")
+    if native_flag() is None:
+        die("no XDG_RUNTIME_DIR, so the pass has nowhere private to record its session")
     if native_active():
         print("native pass: already on")
         return
@@ -1363,7 +1369,12 @@ def native_on():
     for old in NATIVE_DIR.glob("crt-pass-*.so"):
         if old != built:
             old.unlink()
-    shutil.copy(plugin, built)
+    # Never written over: an unloaded build stays mapped, and truncating a file Hyprland
+    # still has mapped kills it on the next load.
+    if not built.exists():
+        fresh = built.with_suffix(".tmp")
+        shutil.copy(plugin, fresh)
+        fresh.rename(built)
     # The flag goes first: a watcher or a reload racing this must already see it.
     native_flag().write_text(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "") + f"\n{built}\n")
     publish_native(st)
@@ -1383,13 +1394,36 @@ def native_on():
     print("native pass: on")
 
 
+def native_session():
+    """The live session the flag names. A session that has ended took the pass with it."""
+    flag = native_flag()
+    try:
+        sig = flag.read_text().split("\n")[0] if flag else ""
+    except OSError:
+        return None
+    if sig and "/" not in sig and (flag.parent / "hypr" / sig / ".socket.sock").exists():
+        return sig
+    return None
+
+
+def native_unload():
+    """True once Hyprland has stopped listing the pass. Its reply to an unload is not
+    the answer, because the flag and the build must outlive a pass still drawing."""
+    lines = native_flag().read_text().split("\n")
+    hyprctl("plugin", "unload", lines[1] if len(lines) > 1 and lines[1] else str(NATIVE_DIR / "crt-pass.so"))
+    listed = (hyprctl("plugin", "list") or "").strip()
+    if not listed or "crt-pass" in listed:
+        return False
+    native_flag().unlink(missing_ok=True)
+    return True
+
+
 def native_off():
     if not native_active():
         print("native pass: already off")
         return
-    lines = native_flag().read_text().split("\n")
-    hyprctl("plugin", "unload", lines[1] if len(lines) > 1 and lines[1] else str(NATIVE_DIR / "crt-pass.so"))
-    native_flag().unlink(missing_ok=True)
+    if not native_unload():
+        die("the native pass did not unload, and is still drawing")
     reset_preconditions()
     st = load()
     apply(st)
@@ -1900,6 +1934,50 @@ _unbind() {{
   esac
 }}
 
+# The native pass draws from inside Hyprland, so it outlives the checkout until it
+# is told to stop, and the plugin that would have told it has gone. The flag names
+# the session, so this works from a shell that has no signature of its own. Status 1
+# means the pass may still be drawing, and the caller must take nothing down, so the
+# next hotkey or theme switch can try again. Only a build in our own directory is
+# unloaded: the flag is the one input here another process could have written.
+_unload() {{
+  local flag sig="" so="" out
+  [ -n "${{XDG_RUNTIME_DIR-}}" ] || return 0
+  flag="$XDG_RUNTIME_DIR/omarchy-crt-native"
+  [ -f "$flag" ] && [ ! -L "$flag" ] || return 0
+  [ -r "$flag" ] || return 1
+  {{ read -r sig || true; read -r so || true; }} <"$flag"
+  case "$sig" in
+    "" | */*) rm -f -- "$flag"; return 0 ;;
+  esac
+  if [ ! -e "$XDG_RUNTIME_DIR/hypr/$sig/.socket.sock" ]; then
+    rm -f -- "$flag"
+    return 0
+  fi
+  [ "${{so%/*}}" = "$_state/native" ] || return 0
+  case "${{so##*/}}" in
+    crt-pass*.so) ;;
+    *) return 0 ;;
+  esac
+  command -v hyprctl >/dev/null 2>&1 || return 1
+  HYPRLAND_INSTANCE_SIGNATURE="$sig" hyprctl plugin unload "$so" >/dev/null 2>&1
+  out=$(HYPRLAND_INSTANCE_SIGNATURE="$sig" hyprctl plugin list 2>/dev/null)
+  [ -n "$out" ] || return 1
+  case "$out" in
+    *crt-pass*) return 1 ;;
+  esac
+  rm -f -- "$flag"
+}}
+
+# A path can fail to answer for several reasons, and only one of them is removal: a
+# dangling link is a moved checkout and an unreadable parent is a permissions fault.
+_gone() {{
+  case "$(LC_ALL=C stat -- "$_root" 2>&1)" in
+    *"No such file or directory"*) return 0 ;;
+  esac
+  return 1
+}}
+
 # $1 is "check" when this is running AS the unit's ExecCondition, and nothing
 # here may then ask systemd for anything: `systemctl stop`, `disable` and
 # `daemon-reload` all queue a job against the very unit systemd is in the middle
@@ -1909,6 +1987,7 @@ _unbind() {{
 # whose file has just been deleted, is exactly the right amount of noticing.
 _disarm() {{
   local f tmp
+  _unload || return 0
   rm -f -- "$_wants"
   for f in "$_unit" "$_hook" "$_lua"; do
     _owned "$f" && rm -f -- "$f"
@@ -1929,6 +2008,7 @@ _disarm() {{
     fi
   fi
   _unbind
+  rm -f -- "$_state"/native/crt-pass*.so
   _owned "$_self" && rm -f -- "$_self"
   return 0
 }}
@@ -1938,12 +2018,20 @@ _disarm() {{
 _check() {{
   local rc mf mode
   mode=${{1-run}}
-  if [ ! -e "$_root" ]; then _disarm "$mode"; return 1; fi
+  if [ ! -e "$_root" ]; then
+    _gone && _disarm "$mode"
+    return 1
+  fi
   mf="$_root/manifest.json"
   if [ ! -f "$mf" ] || [ -L "$mf" ]; then return 1; fi
   grep -qE '"id"[[:space:]]*:[[:space:]]*"{id_re}"' "$mf"
   rc=$?
-  if [ "$rc" -eq 1 ]; then _disarm "$mode"; return 1; fi
+  # A manifest with no id at all is a half-written one. Only another id means a
+  # different plugin has taken this path.
+  if [ "$rc" -eq 1 ]; then
+    grep -qE '"id"[[:space:]]*:[[:space:]]*"[^"]*"' "$mf" && _disarm "$mode"
+    return 1
+  fi
   if [ "$rc" -ne 0 ]; then return 1; fi
   [ -f "$_entry" ] && [ ! -L "$_entry" ] || return 1
   return 0
@@ -2159,6 +2247,16 @@ def uninstall():
     pathnames, which is the same overreach in the other direction as writing
     over them on the way in.
     """
+    sig = native_session()
+    if sig:
+        os.environ["HYPRLAND_INSTANCE_SIGNATURE"] = sig
+        if not native_unload():
+            die("the native pass did not unload, so nothing was removed. "
+                "Run this again, or log out first")
+    elif native_flag():
+        native_flag().unlink(missing_ok=True)
+    for built in NATIVE_DIR.glob("crt-pass*.so"):
+        built.unlink()
     if HYPRLAND_LUA.exists() and not HYPRLAND_LUA.is_symlink():
         text = HYPRLAND_LUA.read_text()
         if REQUIRE in text:
@@ -2284,7 +2382,7 @@ def main(argv):
             native_off()
         elif sub == "status":
             # No signature means this shell cannot see a session, which is not "off".
-            if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+            if not (os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") and native_flag()):
                 print("native pass: unknown (no Hyprland session in this shell)")
             else:
                 print("native pass: " + ("on" if native_active() else "off"))

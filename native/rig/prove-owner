@@ -105,6 +105,19 @@ code, out = crt("native", "off")
 verdict(code == 0 and not plugins(), f"crt native off unloads the pass: {out.splitlines()[-1][:60]}")
 verdict("crt-glass" in (shader() or ""), f"and today's shader is back: {(shader() or '')[-24:]}")
 
+# The same build again. Hyprland kept it mapped, so a rewrite of that file would kill
+# the compositor here, and the statics it left behind must not cost the knobs.
+code, out = crt("native", "on")
+verdict(code == 0 and plugins(), f"the same build loads a second time: {out.splitlines()[-1][:60]}")
+again, _ = grab("second-load")
+verdict(diff(on, again, wh) < 0.05, "with the same picture")
+crt("set", "SCANLINE", "0.95")
+turned, _ = grab("second-knob")
+verdict(diff(on, turned, wh) > 0.3, "and the knobs still reach it")
+crt("set", "SCANLINE", str(k["panel"]["SCANLINE"]))
+crt("native", "off")
+verdict(not plugins(), "and it unloads again")
+
 # A rebuild takes effect with no restart, although Hyprland keeps the old code mapped.
 subprocess.run([HERE + "/../build", NAT + "/crt-pass.so", "-DCRT_RIG", '-DCRT_VERSION="rebuilt"'], capture_output=True)
 crt("native", "on")
@@ -122,6 +135,13 @@ verdict("crt-glass" in (shader() or ""), "a stale flag from a crashed session is
 code, out = crt("native", "status")
 verdict(out.endswith("off"), f"and crt agrees: {out}")
 os.unlink(flag)
+
+# Removal against a real Hyprland, whose answers the stub only imitates.
+crt("native", "on")
+code, out = crt("uninstall")
+verdict(code == 0 and not plugins(), f"uninstall unloads the pass: {out.splitlines()[-1][:60]}")
+verdict(not os.path.exists(flag), "and clears the flag")
+verdict(not [f for f in os.listdir(NAT) if f.endswith(".so")], "and deletes every build")
 
 subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/target.qml"])
 print("FAILED" if fails else "PROVED", flush=True)

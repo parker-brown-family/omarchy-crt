@@ -65,7 +65,7 @@ jobs:
       - name: prove the tests catch a broken native owner
         run: |
           cp crt/crt /tmp/crt.orig
-          sed -i 's/^        return bool(sig) and native_flag().*/        return False/' crt/crt
+          sed -i 's/^        return bool(sig and flag).*/        return False/' crt/crt
           cmp -s crt/crt /tmp/crt.orig && { echo "mutation did not apply" >&2; exit 1; }
           if ./test/run >/dev/null 2>&1; then
             echo "SENTINEL FAILED: the suite passed with native_active always false" >&2

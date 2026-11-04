@@ -2,8 +2,10 @@
 // crt-glass.frag, rewritten so its knobs are uniforms and its baked tube arrays are
 // uniform arrays. Kept free of Hyprland so CI can run it on the shipped shader and
 // hand the result to a GLSL validator: native/test-source.cpp.
+#include <algorithm>
 #include <istream>
 #include <regex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -13,6 +15,32 @@ struct SKnob {
     int         size     = 1;
     int         loc      = -1;
 };
+
+// knobs.txt, one setting per line. A line that will not parse is skipped alone, so a
+// value too large for a float cannot hide the ON or PASS lines after it.
+inline void parseKnobs(std::istream& f, std::vector<SKnob>& knobs, std::vector<std::string>& pass, bool& animated, bool& on) {
+    pass.clear();
+    std::string line;
+    while (std::getline(f, line)) {
+        std::istringstream in(line);
+        std::string        name;
+        if (!(in >> name))
+            continue;
+        if (name == "ANIMATED" || name == "ON") {
+            if (bool b; in >> b)
+                (name == "ON" ? on : animated) = b;
+        } else if (name == "PASS") {
+            if (std::string cls; in >> cls)
+                pass.push_back(cls);
+        } else if (auto it = std::ranges::find_if(knobs, [&](auto const& k) { return k.name == name; }); it != knobs.end()) {
+            float v[3] = {};
+            for (int i = 0; i < it->size; i++)
+                in >> v[i];
+            if (in)
+                std::copy(v, v + 3, it->value);
+        }
+    }
+}
 
 inline std::string nativeFrom(std::istream& f, std::vector<SKnob>& knobs, int maxTubes) {
     static const std::regex knob(R"(^const float (\w+)\s*=\s*(-?[0-9.]+);.*)");
