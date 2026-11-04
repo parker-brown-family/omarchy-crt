@@ -78,7 +78,6 @@ Panel {
   // before the key existed has said nothing, and the set stays on.
   readonly property bool powerOn: !live || live.on !== false
   readonly property bool animated: !!(live && live.animated)
-  readonly property int tubes: (live && typeof live.tubes === "number") ? live.tubes : 0
 
   // The phosphor the shader was actually compiled with — not the theme's
   // accent, not a guess. When AUTO resolved against a staged theme these are
@@ -119,15 +118,6 @@ Panel {
     if (constValue("FLICKER") > 0) out.push("FLICKER")
     if (constValue("JIGGLE") > 0) out.push("JIGGLE")
     return out
-  }
-
-  readonly property string heroMeta: {
-    if (!installed) return "not wired into Hyprland yet"
-    if (!powerOn) return "switched off"
-    var parts = ["on"]
-    parts.push(tubes > 0 ? tubes + " tubes" : "no tubes — flat glass")
-    if (animated) parts.push("clock running")
-    return parts.join("  ·  ")
   }
 
   // ----------------------------------------------------------------- action
@@ -277,7 +267,7 @@ Panel {
     text: "󰟀"
     active: root.installed && root.powerOn
     tooltipText: root.installed
-      ? ("CRT — " + root.heroMeta + "  ·  right-click or super+ctrl+shift+L switches it")
+      ? ("CRT " + (root.powerOn ? "on" : "off") + "  ·  right-click or super+ctrl+shift+L switches it")
       : "CRT — click to wire the glass into Hyprland"
     onPressed: function (buttonCode) {
       // Right-click is the one thing worth doing without reading the tray:
@@ -352,7 +342,6 @@ Panel {
               anchors.rightMargin: power.visible ? Style.space(12) : 0
               anchors.verticalCenter: parent.verticalCenter
               title: "Delight-O-Matic"
-              meta: root.heroMeta
               foreground: root.foreground
               fontFamily: root.fontFamily
             }

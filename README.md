@@ -84,8 +84,8 @@ file lives.
 
 ## Switching it off
 
-**SUPER + CTRL + SHIFT + L** switches the whole CRT off, and again switches it
-back on — L for gLass. So does the **power button** at the top of the tray, a
+**SUPER + CTRL + SHIFT + L**, with or without ALT, switches the whole CRT off,
+and again switches it back on — L for gLass. So does the **power button** at the top of the tray, a
 right-click on the bar icon, or:
 
 ```bash

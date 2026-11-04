@@ -103,6 +103,9 @@ STAGED_COLORS = (
 # L for gLass. SUPER+L, SUPER+CTRL+L and SUPER+SHIFT+L are Omarchy's own
 # (workspace layout, lock, screensaver); this one is free on a stock install.
 HOTKEY = "SUPER + CTRL + SHIFT + L"
+# All four modifiers is what Parker's hand reached for, and on that chord L was
+# bound to nothing, which read as a broken key (2026-11-03). Both work now.
+HOTKEY_ALT = "SUPER + CTRL + SHIFT + ALT + L"
 
 BEGIN = "-- >>> omarchy-crt (managed by `crt install`) >>>"
 END = "-- <<< omarchy-crt <<<"
@@ -619,6 +622,19 @@ def write_passthrough():
 GEOMETRY = PLUGIN / "tubes-geometry"
 MAX_TUBES = 24     # the geometry's own budget; test/probe-snapshot-parity holds them equal
 
+# Overlays that claim no tube. The geometry gives every covering layer the whole
+# output, flat, and says why: its rect tells nothing about where its content is.
+# That is the right trade for a menu you are looking at. It is the wrong one for
+# a toast, whose full-monitor host surface holds one small card: every tile went
+# flat for as long as "screenshot saved" stayed up (2026-11-03). Unclaimed, the
+# card is drawn through the tile beneath it, bent with the glass, and the desktop
+# holds still.
+#
+# The screenshot freeze must NOT go on this list. A capture includes the warp, so
+# hyprpicker's frozen frame is already bent, and it only looks right because its
+# flat claim draws it unbent again. Unclaimed it would be bent twice.
+UNCLAIMED_LAYERS = {"omarchy-notifications"}
+
 
 def geometry_program():
     """The jq program inside the vendored geometry, or None.
@@ -641,13 +657,23 @@ def geometry_program():
 _GEOMETRY_PROGRAM = None
 
 
+def claimed_layers(layers):
+    """`hyprctl layers` without the surfaces in UNCLAIMED_LAYERS."""
+    if not isinstance(layers, dict):
+        return layers
+    return {mon: {**doc, "levels": {
+                lvl: [s for s in surfaces if s.get("namespace") not in UNCLAIMED_LAYERS]
+                for lvl, surfaces in doc.get("levels", {}).items()}}
+            for mon, doc in layers.items()}
+
+
 def tube_rows():
     """Every surface that gets a tube, as dicts, or None when it cannot be known."""
     program = geometry_program()
     mons, clients = hypr_query("monitors"), hypr_query("clients")
     if program is None or mons is None or clients is None or not shutil.which("jq"):
         return None
-    layers = hypr_query("layers")
+    layers = claimed_layers(hypr_query("layers"))
     r = subprocess.run(
         ["jq", "-nc", "--argjson", "m", json.dumps(mons), "--argjson", "c", json.dumps(clients),
          "--argjson", "l", json.dumps({} if layers is None else layers), program],
@@ -902,6 +928,7 @@ def tubes_watch():
     DEBOUNCE = 0.045
     COALESCE_MAX = 0.20
     last_build = 0.0
+    urgent = False
     dirty = False
     first_pending = None
     deadline = None
@@ -955,6 +982,18 @@ def tubes_watch():
                         if first_pending is None:
                             first_pending = now
                         deadline = now + DEBOUNCE   # slide the quiet-gap window
+                        urgent = urgent or name in ("openlayer", "closelayer")
+
+                # A layer coming or going is the one change with a picture wrong
+                # until the rebuild lands: when the screenshot freeze closes, the
+                # live desktop shows through the freeze's flat tube, which reads
+                # as every tile snapping to fill its frame and back. Nothing
+                # settles behind a layer the way tiles do behind a window, so the
+                # debounce only prolongs that. The layout coming back is usually
+                # one the driver has cached, so the rebuild itself is quick.
+                if urgent and dirty:
+                    deadline = now
+                urgent = False
 
             # The silent resize (see RECT_POLL). The poll interval is already the
             # debounce, so a changed rect rebuilds as soon as the speed limit
@@ -1855,6 +1894,8 @@ end
 -- {HOTKEY} switches the whole CRT off and on. It runs through the guard like
 -- every other registration, so once the plugin is gone the key does nothing.
 hl.bind("{HOTKEY}", hl.dsp.exec_cmd("{shlex.quote(str(GUARD))} run toggle"),
+        {{ description = "Switch the CRT on or off" }})
+hl.bind("{HOTKEY_ALT}", hl.dsp.exec_cmd("{shlex.quote(str(GUARD))} run toggle"),
         {{ description = "Switch the CRT on or off" }})
 {END}
 """

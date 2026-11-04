@@ -133,6 +133,27 @@ try:
             verdict(all((m == "0") == (q == "0") for m, q in zip(mon.split(", "), quiet.split(", "))),
                     "and the unfocused monitor goes quiet")
 
+    # A toast's host surface covers the monitor and must leave the tiles alone.
+    # The freeze covers it too and must keep its flat claim: a capture is already
+    # bent, so unclaimed it would be bent twice.
+    desk = [monitor(0, "A", 1920, 1080, focused=True)]
+    tile = [client(1, 10, 40, 1900, 1000)]
+
+    def over(ns):
+        (SB / "monitors.json").write_text(json.dumps(desk))
+        (SB / "clients.json").write_text(json.dumps(tile))
+        (SB / "layers.json").write_text(json.dumps(
+            {"A": {"levels": {"3": [layer(0, 0, 1920, 1080, ns)]}}}))
+        return crt.td_tubes_block((), True)
+
+    (SB / "layers.json").write_text("{}")
+    (SB / "monitors.json").write_text(json.dumps(desk))
+    (SB / "clients.json").write_text(json.dumps(tile))
+    bare = crt.td_tubes_block((), True)
+    verdict(over("omarchy-notifications") == bare, "a toast leaves the tiles exactly as they were")
+    frozen = over("hyprpicker")
+    verdict(frozen != bare and "// hyprpicker" in frozen, "the screenshot freeze keeps its flat claim")
+
     # A class is the one string here a program chooses, and it lands in shader
     # source. A newline would end the comment and put the rest into the code.
     (SB / "monitors.json").write_text(json.dumps([monitor(0, "A", 1920, 1080, focused=True)]))

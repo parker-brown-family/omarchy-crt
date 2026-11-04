@@ -704,7 +704,7 @@ print(table.concat(seen, " "))
 LUA
   reload() { CRT_LUA="$LUAF_" "$LUA_BIN" "$SANDBOX/power.lua"; }
   check "a reload while off binds the passthrough, asks for no tier, and binds the key" \
-    "$(reload)" "shader=passthrough.frag bind=SUPER + CTRL + SHIFT + L|$GUARDF_ run toggle"
+    "$(reload)" "shader=passthrough.frag bind=SUPER + CTRL + SHIFT + L|$GUARDF_ run toggle bind=SUPER + CTRL + SHIFT + ALT + L|$GUARDF_ run toggle"
 fi
 
 env -u HYPRLAND_INSTANCE_SIGNATURE timeout 10 "$CRT" tubes watch >/dev/null 2>&1
@@ -1010,6 +1010,10 @@ check "the power button sits beside the hero" \
   "$(( button_line > hero_line && button_line - hero_line < 15 ))" "1"
 check "and above the dials" "$(( button_line < knobs_line ))" "1"
 check "the old POWER strip is gone" "$(grep -c '"POWER ON"' "$PANEL")" "0"
+check "the nameplate carries no status line" "$(grep -c 'meta:' "$PANEL")" "0"
+"$CRT" install >/dev/null 2>&1
+check "crt.lua binds the switch with and without ALT" \
+  "$(grep -cE '^hl\.bind\("SUPER \+ CTRL \+ SHIFT \+ (ALT \+ )?L"' "$HOME/.config/hypr/crt.lua" 2>/dev/null)" "2"
 check "the button is a real file beside the panel" "$(test -f "$REPO/PowerButton.qml" && echo yes)" "yes"
 check "and pulls no shell module in, so it can be drawn alone" \
   "$(grep -c '^import q[s]' "$REPO/PowerButton.qml")" "0"
