@@ -15,8 +15,8 @@ The gates collapsed because the two approvals so far were "Keep going! <3" and "
 - [x] Slice 1 — the whole CRT look, with knobs that change live
 - [x] Slice 2 — windows own the right pixels
 - [x] Slice 3 — one owner, an off switch and a way back
-- [ ] Slice 4 — everything that can go wrong, in the sealed seat (done: drag, scroll, lock, idle, GPU cost. Left: real Omarchy toasts, blur, X11, pointer lock, recording, hotplug, special workspaces, groups, pins)
-- [ ] Slice 5 — your desktop, opt-in (tracer fired 2026-11-04: a real toast came out flat on the live desktop; Parker has not yet judged it)
+- [ ] Slice 4 — everything that can go wrong (done: drag, scroll, lock, idle, GPU cost, workspace slide, blur. Left: X11, pointer lock by a real game, recording, hotplug, the square border corner in issue 9)
+- [x] Slice 5 — your desktop, opt-in: running since 2026-11-04, Parker: "really nice"
 
 ## Notes for a fresh session
 Parker ruled on 2026-11-04 that losing scanlines on the bar is fine. The same is assumed for toasts and menus, because they are drawn after the CRT too. He has not said so about those two.
