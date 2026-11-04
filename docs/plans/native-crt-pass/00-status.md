@@ -12,8 +12,8 @@ The gates collapsed because the two approvals so far were "Keep going! <3" and "
 - [x] Proof: toasts flat over a curved tile
 - [x] Proof: clicks land on what a curved tile shows
 - [x] Proof: plugin unloads cleanly
-- [ ] Slice 1 — the whole CRT look, with knobs that change live
-- [ ] Slice 2 — windows own the right pixels
+- [x] Slice 1 — the whole CRT look, with knobs that change live
+- [x] Slice 2 — windows own the right pixels
 - [ ] Slice 3 — one owner, an off switch and a way back
 - [ ] Slice 4 — everything that can go wrong, in the sealed seat
 - [ ] Slice 5 — your desktop, opt-in
