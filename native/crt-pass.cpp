@@ -32,7 +32,10 @@
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/helpers/math/Math.hpp>
 #include <hyprland/src/state/MonitorState.hpp>
+#define private public     // m_currentlyHeldButtons, read-only here
 #include <hyprland/src/managers/input/InputManager.hpp>
+#undef private
+#include <hyprland/src/managers/SessionLockManager.hpp>
 #include <hyprland/src/pointer/PointerManager.hpp>
 #include <hyprland/src/desktop/state/ViewStateTracker.hpp>
 #include <hyprland/src/desktop/state/ViewHitTester.hpp>
@@ -223,6 +226,12 @@ class CCrtPass : public IPassElement {
 
     std::vector<UP<IPassElement>> draw() override {
         g_frames++;
+#ifdef CRT_RIG
+        std::ofstream(std::string(getenv("HOME")) + "/frames.now") << g_frames << "\n";
+        const bool timed = rig("time-pass");
+        if (timed) glFinish();
+        const auto t0 = std::chrono::steady_clock::now();
+#endif
         GLint target = 0, vp[4] = {}, prog = 0, vao = 0, active = 0, tex = 0;
         glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &target);
         glGetIntegerv(GL_VIEWPORT, vp);
@@ -295,6 +304,15 @@ class CCrtPass : public IPassElement {
         glUseProgram(prog);
         if (blend) glEnable(GL_BLEND);
         if (scissor) glEnable(GL_SCISSOR_TEST);
+#ifdef CRT_RIG
+        if (timed) {
+            glFinish();
+            static double total = 0;
+            static long   n     = 0;
+            total += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            std::ofstream(std::string(getenv("HOME")) + "/pass-ms.txt") << total / ++n << " " << n << " " << w << "x" << h << "\n";
+        }
+#endif
         return {};
     }
 
@@ -405,9 +423,29 @@ static SP<CWLSurfaceResource> hkLayerAt(void* self, const Vector2D& pos, std::ve
     return ((origLayerAt)g_layerHook->m_original)(self, pos, layers, coords, found, lock);
 }
 
+static Vector2D through(const CBox& box, const Vector2D& p, bool clamp) {
+    const auto   c  = (p - box.pos()) / box.size() - Vector2D{0.5, 0.5};
+    const double r2 = c.x * c.x + c.y * c.y, k = 1.0 + knob("TUBE_K1", 0) * r2 + knob("TUBE_K2", 0) * r2 * r2;
+    Vector2D     w  = Vector2D{0.5, 0.5} + c * k;
+    if (clamp)
+        w = {std::clamp(w.x, 0.0, 0.999), std::clamp(w.y, 0.0, 0.999)};
+    return box.pos() + w * box.size();
+}
+
+// A press belongs to whatever it landed on until the button comes up. Without this a
+// drag from a tile jumps by the whole correction as it crosses a flat toast.
+static std::optional<CBox> g_pressTube;
+
 static std::optional<Vector2D> mapped(const Vector2D& p) {
-    if (rig("input-flat") || !g_on)
+    // The lock screen is flat and its surfaces are hit where they are drawn. The
+    // windows behind it are still mapped, so this must be asked before anything else.
+    if (rig("input-flat") || !g_on || g_pSessionLockManager->isSessionLocked()) {
+        g_pressTube.reset();
         return std::nullopt;
+    }
+    if (!g_pInputManager->m_currentlyHeldButtons.empty())
+        return g_pressTube ? std::optional{through(*g_pressTube, p, false)} : std::nullopt;
+    g_pressTube.reset();
     for (auto const& m : State::monitorState()->monitors()) {
         if (!m->logicalBox().containsPoint(p))
             continue;
@@ -417,14 +455,12 @@ static std::optional<Vector2D> mapped(const Vector2D& p) {
             if (Desktop::viewState()->hitTest().layerSurfaceAt(p, &m->m_layerSurfaceLayers[lvl], &coords, &layer))
                 return std::nullopt;
         for (auto const& t : tubes(m)) {
-            const auto c = (p - t.logical.pos()) / t.logical.size() - Vector2D{0.5, 0.5};
-            if (std::abs(c.x) > 0.5 || std::abs(c.y) > 0.5)
+            if (!t.logical.containsPoint(p))
                 continue;
             if (t.curv == 0 || t.pass)
                 return std::nullopt;
-            const double r2 = c.x * c.x + c.y * c.y, k = 1.0 + knob("TUBE_K1", 0) * r2 + knob("TUBE_K2", 0) * r2 * r2;
-            const double x = std::clamp(0.5 + c.x * k, 0.0, 0.999), y = std::clamp(0.5 + c.y * k, 0.0, 0.999);
-            return t.logical.pos() + Vector2D{x, y} * t.logical.size();
+            g_pressTube = t.logical;
+            return through(t.logical, p, true);
         }
     }
     return std::nullopt;

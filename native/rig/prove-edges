@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""The cases that break in use.  prove-edges <state-dir> <out-dir>
+
+A still screen, a drag across a toast's edge, a scroll, a session lock, and what
+the pass costs on the GPU at the laptop panel's size.
+"""
+import json, os, re, subprocess, sys, time
+S, OUT = sys.argv[1], sys.argv[2]
+HOME = S + "/home"; FIFO = HOME + "/vptr.fifo"
+os.makedirs(OUT, exist_ok=True)
+fails = 0
+def verdict(ok, text):
+    global fails
+    fails += 0 if ok else 1
+    print(f"  {'ok  ' if ok else 'FAIL'} {text}", flush=True)
+def inn(*a):
+    return subprocess.run([S + "/in", *a], capture_output=True, text=True, timeout=30)
+def spawn(args, log=os.devnull):
+    return subprocess.Popen([S + "/in", *args], stdout=open(log, "w"), stderr=subprocess.STDOUT, start_new_session=True)
+def client(name):
+    return spawn(["env", "QT_QPA_PLATFORM=wayland", "QS_NO_RELOAD_POPUP=1", "quickshell", "-p", f"{HOME}/client/{name}.qml"], f"{HOME}/{name}.log")
+def stop(name):
+    subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/{name}.qml"])
+def send(line):
+    with open(FIFO, "w") as f: f.write(line + "\n")
+def log(name, kind):
+    return re.findall(rf"{kind} (\w+) (-?[\d.]+) (-?[\d.]+)", open(f"{HOME}/{name}.log", errors="replace").read())
+def frames():
+    return int(open(HOME + "/frames.now").read())
+K = dict(l.split()[:2] for l in open(HOME + "/knobs.txt") if len(l.split()) >= 2)
+K1, K2 = float(K["TUBE_K1"]), float(K["TUBE_K2"])
+mon = json.loads(inn("hyprctl", "monitors", "-j").stdout)[0]
+LW, LH = mon["width"] / mon["scale"], mon["height"] / mon["scale"]
+for f in ("keep-drawing", "time-pass", "vptr.fifo"):
+    try: os.unlink(f"{HOME}/{f}")
+    except OSError: pass
+for n in ("tile", "tile2", "toast", "target", "lock"): stop(n)
+subprocess.run(["pkill", "-f", f"[v]ptr {FIFO}"]); time.sleep(.5)
+spawn([HOME + "/vptr", FIFO, str(round(LW)), str(round(LH))]); client("target")
+for _ in range(60):
+    if '"class"' in inn("hyprctl", "clients", "-j").stdout and os.path.exists(FIFO): break
+    time.sleep(.25)
+time.sleep(1.5)
+win = json.loads(inn("hyprctl", "clients", "-j").stdout)[0]
+X, Y = win["at"]; W, H = win["size"]
+def warp(px, py):
+    cx, cy = (px - X) / W - .5, (py - Y) / H - .5
+    r2 = cx*cx + cy*cy; k = 1 + K1*r2 + K2*r2*r2
+    return (.5 + cx*k) * W, (.5 + cy*k) * H
+
+# A still screen draws nothing. The pass must not change that.
+send(f"move {round(LW/2)} {round(LH/2)}"); time.sleep(2)
+a = frames(); time.sleep(3); b = frames()
+verdict(b - a == 0, f"a still desktop draws no frames: {b - a} in 3 s")
+
+# Scroll: delivered, at the corrected position.
+px, py = X + W * .1, Y + H * .12
+send(f"move {round(px)} {round(py)}"); time.sleep(.3)
+n = len(log("target", "WHEEL")); send("scroll"); time.sleep(.5)
+w = log("target", "WHEEL")
+ex, ey = warp(round(px), round(py))
+ok = len(w) > n and abs(float(w[-1][1]) - ex) <= 3 and abs(float(w[-1][2]) - ey) <= 3
+verdict(ok, f"a scroll lands at the corrected position: {w[-1][1:] if w else None} want {ex:.0f},{ey:.0f}")
+
+# Drag from the tile across a card. A press belongs to the tile until it is released.
+client("toast")
+for _ in range(40):
+    if "omarchy-notifications" in inn("hyprctl", "layers", "-j").stdout: break
+    time.sleep(.25)
+time.sleep(1.5)
+sx, y = round(LW - 620), 80
+send(f"move {sx} {y}"); time.sleep(.2); send("press"); time.sleep(.2)
+seen = len(log("target", "DRAG"))
+for x in range(sx, round(LW - 200), 30):
+    send(f"move {x} {y}"); time.sleep(.04)
+time.sleep(.3); send("release"); time.sleep(.4)
+d = [float(p[1]) for p in log("target", "DRAG")[seen:]]
+# The last move is deep inside the card, near the tile's edge, where the correction
+# is largest. It must still be corrected: the press belongs to the tile.
+want = warp(x, y)[0]
+err = abs(d[-1] - want) if d else None
+raw = abs(want - (x - X))
+verdict(len(d) > 5 and err <= 3, f"a drag across a card stays corrected: off by {err:.1f} px at its end (uncorrected would be {raw:.0f})")
+inn("timeout", "1", "true")
+got = len(log("toast", "CLICK"))
+verdict(got == 0, "and the card it crossed got no click")
+stop("toast")
+
+# Before the lock, because a seat whose locker is killed stays locked and draws no pass.
+open(HOME + "/time-pass", "w").close(); open(HOME + "/keep-drawing", "w").close()
+try: os.unlink(HOME + "/pass-ms.txt")
+except OSError: pass
+send(f"move {round(LW/2)} {round(LH/3)}")      # the first frame, which keeps the rest coming
+time.sleep(5)
+print("  cost:", open(HOME + "/pass-ms.txt").read().strip(), "(mean ms per pass, frames, framebuffer)", flush=True)
+os.unlink(HOME + "/time-pass"); os.unlink(HOME + "/keep-drawing")
+
+# The lock screen: flat, and hit where it is drawn, whatever is behind it.
+client("lock"); time.sleep(2.5)
+px, py = X + W * .07, Y + H * .1
+n = len(log("lock", "CLICK"))
+send(f"move {round(px)} {round(py)}"); time.sleep(.3); send("click"); time.sleep(.6)
+c = log("lock", "CLICK")
+ok = len(c) > n and abs(float(c[-1][1]) - round(px)) <= 2 and abs(float(c[-1][2]) - round(py)) <= 2
+verdict(ok, f"a click on the lock screen is not corrected: {c[-1][1:] if c else None} want {round(px)},{round(py)}")
+stop("lock"); time.sleep(1)
+
+stop("target"); subprocess.run(["pkill", "-f", f"[v]ptr {FIFO}"])
+print("FAILED" if fails else "PROVED", flush=True)
+sys.exit(1 if fails else 0)

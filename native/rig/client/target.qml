@@ -28,6 +28,8 @@ ShellRoot {
     MouseArea {
       anchors.fill: parent
       onClicked: function(m) { console.log("CLICK tile", m.x, m.y) }
+      onPositionChanged: function(m) { if (m.buttons) console.log("DRAG tile", m.x, m.y) }
+      onWheel: function(w) { console.log("WHEEL tile", w.x, w.y) }
     }
   }
 }

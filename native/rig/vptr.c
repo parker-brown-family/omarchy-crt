@@ -42,6 +42,13 @@ int main(int argc, char** argv) {
             if (sscanf(line, "move %u %u", &x, &y) == 2) {
                 zwlr_virtual_pointer_v1_motion_absolute(p, now(), x, y, ew, eh);
                 zwlr_virtual_pointer_v1_frame(p);
+            } else if (!strncmp(line, "press", 5) || !strncmp(line, "release", 7)) {
+                zwlr_virtual_pointer_v1_button(p, now(), BTN_LEFT, line[0] == 'p');
+                zwlr_virtual_pointer_v1_frame(p);
+            } else if (!strncmp(line, "scroll", 6)) {
+                zwlr_virtual_pointer_v1_axis_source(p, 0);
+                zwlr_virtual_pointer_v1_axis_discrete(p, now(), 0, wl_fixed_from_int(15), 1);
+                zwlr_virtual_pointer_v1_frame(p);
             } else if (!strncmp(line, "click", 5)) {
                 zwlr_virtual_pointer_v1_button(p, now(), BTN_LEFT, 1);
                 zwlr_virtual_pointer_v1_frame(p);
