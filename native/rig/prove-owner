@@ -105,6 +105,13 @@ code, out = crt("native", "off")
 verdict(code == 0 and not plugins(), f"crt native off unloads the pass: {out.splitlines()[-1][:60]}")
 verdict("crt-glass" in (shader() or ""), f"and today's shader is back: {(shader() or '')[-24:]}")
 
+# A rebuild takes effect with no restart, although Hyprland keeps the old code mapped.
+subprocess.run([HERE + "/../build", NAT + "/crt-pass.so", "-DCRT_RIG", '-DCRT_VERSION="rebuilt"'], capture_output=True)
+crt("native", "on")
+verdict("rebuilt" in inn("hyprctl", "plugin", "list").stdout, "a rebuilt plugin loads in the same session")
+crt("native", "off")
+verdict(not plugins(), "and unloads again")
+
 # A session that died with the pass on leaves its flag behind. It names a dead
 # session, so a reload must bind the shader as usual.
 flag = S + "/run/omarchy-crt-native"

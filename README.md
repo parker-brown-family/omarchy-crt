@@ -108,6 +108,21 @@ running, in either direction: two programs binding one screen shader do not
 error, they take turns, and on a desktop that looks like tiles flickering
 between warped and flat as the pointer crosses them.
 
+## Flat toasts: the native pass (optional)
+
+A screen shader runs after everything is composited, so toasts and menus bend with the tiles under them. The native pass is a small Hyprland plugin that runs the same shader earlier, after windows and before overlays, so they stay flat over curved tiles. Tile moves stop freezing the desktop too, because nothing recompiles.
+
+```bash
+native/build
+```
+```bash
+crt native on
+```
+
+It loads into the running session only, and nothing goes in your config, so a reboot or a crash comes back on the screen shader. `crt native off` takes it out. The tray, the knobs and the hotkey work the same either way. The bar and overlays are drawn after the CRT, so they lose the scanlines and glow.
+
+It runs inside Hyprland, so a bug can take your session down. It is built for one exact Hyprland version and refuses any other, so after a Hyprland update run `native/build` again. It isn't part of the Omarchy plugin install.
+
 ## How it works, and the two things worth knowing
 
 **Hyprland screen shaders take no uniforms**, and there is no IPC to set one. So
@@ -160,6 +175,7 @@ when you start the clock and hands it back when you stop.
 | `Knob.qml` | one dial — canvas face, angular drag, wheel |
 | `PowerButton.qml` | the switch at the top of the tray |
 | `crt/crt-glass.frag` | the template, never written to |
+| `native/` | the optional Hyprland plugin and its sealed test seat |
 | `crt/crt` | render, knobs, tubes, install |
 | `crt/crt-tubes.service` | the watcher that keeps the rects true |
 | `bin/shoot` | stages a workspace and photographs it — never the live desktop |

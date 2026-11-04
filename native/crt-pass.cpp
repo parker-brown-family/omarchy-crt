@@ -21,6 +21,7 @@
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/Workspace.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
@@ -381,6 +382,10 @@ static std::vector<STube> tubes(PHLMONITOR m) {
         if (out.size() >= MAX_TUBES)
             break;
         CBox logical = {w->positionAnimation()->value(), w->sizeAnimation()->value()};
+        // Where the renderer really draws it: a sliding workspace carries its windows.
+        if (w->m_workspace && !w->m_pinned && w->m_workspace->m_renderOffset->isBeingAnimated())
+            logical.translate(w->m_workspace->m_renderOffset->value());
+        logical.translate(w->m_floatingOffset);
         if (w->m_isFloating && !Fullscreen::controller()->isFullscreen(w) && w->m_ruleApplicator->decorate().valueOrDefault())
             logical.expand(w->getRealBorderSize());
         // The framebuffer is in the panel's own orientation, not the rotated one a
@@ -439,7 +444,9 @@ static std::optional<CBox> g_pressTube;
 static std::optional<Vector2D> mapped(const Vector2D& p) {
     // The lock screen is flat and its surfaces are hit where they are drawn. The
     // windows behind it are still mapped, so this must be asked before anything else.
-    if (rig("input-flat") || !g_on || g_pSessionLockManager->isSessionLocked()) {
+    // A pointer a game has locked or confined is that game's: its motion is relative,
+    // and correcting the position would fight the confinement.
+    if (rig("input-flat") || !g_on || g_pSessionLockManager->isSessionLocked() || g_pInputManager->isConstrained()) {
         g_pressTube.reset();
         return std::nullopt;
     }
@@ -540,7 +547,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
             g_pHyprRenderer->m_renderPass.add(makeUnique<CDump>());
 #endif
     });
-    return {"crt-pass", "CRT below top and overlay layers (proof of concept)", "Parker Brown", "0.0.1"};
+#ifndef CRT_VERSION
+#define CRT_VERSION "0.1.0"
+#endif
+    return {"crt-pass", "The CRT, below top and overlay layers", "Parker Brown", CRT_VERSION};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() { 

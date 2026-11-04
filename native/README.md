@@ -1,10 +1,10 @@
-# Native CRT pass: proof of concept
+# Native CRT pass
 
-Not shipped, and not for the live desktop. This shows that the CRT can run inside
-Hyprland after windows and before top and overlay layers, so toasts land flat on a
-curved tile. Nothing here is installed by `crt install`.
+An optional plugin that runs the CRT inside Hyprland after windows and before top
+and overlay layers, so toasts land flat on a curved tile. Nothing here is installed
+by `crt install`; `native/build` and `crt native on` are the way in.
 
-- `crt-pass.cpp` is a Hyprland plugin, built against the installed headers.
+- `crt-pass.cpp` is the plugin, built against the installed headers by `build`.
 - `sandbox` is a seat that cannot reach the live desktop: no display device, no
   input, no login bus, no live Wayland socket. Hyprland 0.56.2 has no headless-only
   switch, so this is what keeps a second compositor off the real screen.
@@ -20,7 +20,9 @@ native/rig/prove /tmp/crt-seat /tmp/crt-seat/out
 native/rig/prove-pointer /tmp/crt-seat /tmp/crt-seat/out
 ```
 
-Unloading the plugin from a running Hyprland crashes it (seen 2026-11-04, cause not
-diagnosed), so restart the seat rather than reloading.
+```bash
+native/rig/matrix /tmp/crt-seat
+```
 
-Run on an NVIDIA box. `rig/headless-gpu.cpp` hardcodes the render node path.
+`matrix` runs every proof on every monitor shape. Seat programs are non-dumpable, so
+a crash in the seat can't reach the live desktop's crash watcher.

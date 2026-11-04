@@ -45,6 +45,7 @@ reachable by its own name, and a service knob set by hand outranks the macro
 that would otherwise cover it — until you turn that macro again.
 """
 
+import hashlib
 import json
 import math
 import os
@@ -1315,7 +1316,7 @@ def native_active():
     """Does the native pass own the glass in THIS Hyprland session?"""
     sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
     try:
-        return bool(sig) and native_flag().read_text().strip() == sig
+        return bool(sig) and native_flag().read_text().split("\n")[0] == sig
     except OSError:
         return False
 
@@ -1342,13 +1343,19 @@ def native_on():
         return
     shutil.copy(TEMPLATE, NATIVE_DIR / "crt-glass.frag")
     st = load()
+    # Hyprland keeps an unloaded plugin mapped and hands the old code back for the same
+    # path, so each build loads under a name of its own, and a rebuild needs no restart.
+    digest = hashlib.sha256(plugin.read_bytes()).hexdigest()[:12]
+    built = NATIVE_DIR / f"crt-pass-{digest}.so"
+    for old in NATIVE_DIR.glob("crt-pass-*.so"):
+        if old != built:
+            old.unlink()
+    shutil.copy(plugin, built)
     # The flag goes first: a watcher or a reload racing this must already see it.
-    native_flag().write_text(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "") + "\n")
+    native_flag().write_text(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "") + f"\n{built}\n")
     publish_native(st)
     stop_watcher()
-    # Hyprland keeps an unloaded plugin mapped, so loading this path again in the same
-    # session reuses the old code, even after a rebuild. A new build needs a new session.
-    out = (hyprctl("plugin", "load", str(plugin)) or "").strip()
+    out = (hyprctl("plugin", "load", str(built)) or "").strip()
     if out != "ok":
         native_flag().unlink(missing_ok=True)
         print(f"native pass refused, staying on the screen shader ({out[:120]}). "
@@ -1358,6 +1365,7 @@ def native_on():
             start_watcher()
         raise SystemExit(1)
     set_shader("")
+    hyprctl("eval", "hl.config({ render = { direct_scanout = 0 } })")   # it would skip the pass
     preconditions(False, 1, force=True)
     print("native pass: on")
 
@@ -1366,7 +1374,8 @@ def native_off():
     if not native_active():
         print("native pass: already off")
         return
-    hyprctl("plugin", "unload", str(NATIVE_DIR / "crt-pass.so"))
+    lines = native_flag().read_text().split("\n")
+    hyprctl("plugin", "unload", lines[1] if len(lines) > 1 and lines[1] else str(NATIVE_DIR / "crt-pass.so"))
     native_flag().unlink(missing_ok=True)
     reset_preconditions()
     st = load()
@@ -2005,7 +2014,7 @@ if knobs then
 end
 local frag = "{SHADER}"
 if native then
-  hl.config({{ debug = {{ damage_tracking = 1 }} }})
+  hl.config({{ debug = {{ damage_tracking = 1 }}, render = {{ direct_scanout = 0 }} }})
 elseif off then
   local plain = io.open("{PASSTHROUGH}", "r")
   if plain then
