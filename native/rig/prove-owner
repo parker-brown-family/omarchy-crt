@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Can the owner be switched, knocked over and got back?  prove-owner <state-dir> <out-dir>
+
+Drives the real `crt` tool inside the sealed seat, with crt.lua in the seat's
+config, and tries each way the two paths could fight or strand the desktop: on,
+off, the power switch, a knob, a config reload, a stale session flag and a plugin
+built for another Hyprland.
+"""
+import importlib.machinery, importlib.util, json, os, shutil, subprocess, sys, time
+S, OUT = sys.argv[1], sys.argv[2]
+HOME = S + "/home"; HERE = os.path.dirname(os.path.abspath(__file__)); CRT = os.path.abspath(os.path.join(HERE, "..", "..", "crt", "crt"))
+REAL = os.path.expanduser("~/.local/state/omarchy")
+state_home = HOME + "/.state"; st = state_home + "/omarchy"; NAT = st + "/crt/native"
+os.makedirs(OUT, exist_ok=True)
+fails = 0
+def verdict(ok, text):
+    global fails
+    fails += 0 if ok else 1
+    print(f"  {'ok  ' if ok else 'FAIL'} {text}", flush=True)
+def inn(*a, t=30):
+    return subprocess.run([S + "/in", *a], capture_output=True, text=True, timeout=t)
+def crt(*a):
+    r = inn("env", f"XDG_STATE_HOME={state_home}", f"XDG_CONFIG_HOME={HOME}/.config", "CRT_TUBES_ANYWAY=1", "python3", CRT, *a)
+    return r.returncode, (r.stdout + r.stderr).strip()
+def shader():
+    for l in inn("hyprctl", "getoption", "decoration:screen_shader").stdout.splitlines():
+        if l.startswith("str:"): return l[4:].strip().strip('"')
+    return None
+def plugins():
+    return "crt-pass" in inn("hyprctl", "plugin", "list").stdout
+def grab(name):
+    time.sleep(1.2)
+    p = f"{HOME}/{name}.ppm"
+    r = inn("timeout", "6", "grim", "-t", "ppm", p)
+    if r.returncode: sys.exit(f"grim {name}: {r.stderr or r.returncode}")
+    parts = open(p, "rb").read().split(b"\n", 3)
+    return parts[3], tuple(map(int, parts[1].split()))
+def diff(a, b, wh):
+    w, h = wh; tot = n = 0
+    for y in range(0, h, 4):
+        for x in range(0, w, 4):
+            if abs(x - w/2) < 90 and abs(y - h/2) < 90: continue
+            i = (y*w+x)*3; tot += abs(a[i]-b[i]) + abs(a[i+1]-b[i+1]) + abs(a[i+2]-b[i+2]); n += 3
+    return tot / n
+
+os.makedirs(st + "/crt", exist_ok=True); os.makedirs(st + "/current/theme", exist_ok=True); os.makedirs(NAT, exist_ok=True)
+k = json.load(open(REAL + "/crt/knobs.json")); k.update(on=True, animated=False, passthrough=[])
+for f in ("FLICKER", "JIGGLE"): k["service"][f] = 0
+k["panel"]["TRACKING"] = 0
+json.dump(k, open(st + "/crt/knobs.json", "w"))
+shutil.copy(REAL + "/current/theme/colors.toml", st + "/current/theme/colors.toml")
+shutil.copy(HOME + "/crt-pass.so", NAT + "/crt-pass.so")
+# Built for another Hyprland, as after an update: refused, and the shader stays. This
+# needs a seat that has never loaded the plugin, because Hyprland keeps an unloaded
+# one mapped and would hand the old code back.
+if len(sys.argv) > 3 and sys.argv[3] == "refused":
+    subprocess.run([HERE + "/../build", NAT + "/crt-pass.so", "-DCRT_RIG", "-DCRT_FORCE_MISMATCH"], capture_output=True)
+    code, out = crt("native", "on")
+    verdict(code != 0 and not plugins(), f"a mismatched plugin is refused, exit {code}")
+    verdict(not os.path.exists(S + "/run/omarchy-crt-native"), "and leaves no flag behind")
+    verdict("crt-glass" in (shader() or ""), "and today's shader is bound")
+    print("FAILED" if fails else "PROVED", flush=True)
+    sys.exit(1 if fails else 0)
+open(HOME + "/keep-drawing", "w").close()
+subprocess.Popen([S + "/in", "env", "QT_QPA_PLATFORM=wayland", "QS_NO_RELOAD_POPUP=1", "quickshell", "-p", f"{HOME}/client/target.qml"],
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+for _ in range(60):
+    if '"class"' in inn("hyprctl", "clients", "-j").stdout: break
+    time.sleep(.25)
+time.sleep(1.5)
+
+verdict(not plugins(), "the seat starts with no plugin")
+code, out = crt("native", "on")
+verdict(code == 0 and plugins(), f"crt native on loads the pass: {out.splitlines()[-1][:70]}")
+verdict(shader() in ("", "EMPTY", None) or "crt-glass" not in shader(), f"and no screen shader is bound over it: {shader()!r}")
+on, wh = grab("on")
+
+code, out = crt("off")
+off, _ = grab("switched-off")
+verdict(diff(on, off, wh) > 0.5, "crt off takes the curve away")
+crt("on")
+back, _ = grab("switched-on")
+verdict(diff(on, back, wh) < 0.05, "crt on brings back the same picture")
+
+crt("set", "SCANLINE", "0.95")
+turned, _ = grab("knob")
+verdict(diff(on, turned, wh) > 0.3, "crt set reaches the pass")
+crt("set", "SCANLINE", str(k["panel"]["SCANLINE"]))
+back, _ = grab("knob-back")
+verdict(diff(on, back, wh) < 0.05, "and turning it back restores the picture")
+
+os.makedirs(HOME + "/.config/hypr", exist_ok=True)
+os.environ.update(XDG_STATE_HOME=state_home, HOME=HOME, XDG_CONFIG_HOME=HOME + "/.config")
+ld = importlib.machinery.SourceFileLoader("crtmod", CRT); sp = importlib.util.spec_from_loader("crtmod", ld)
+m = importlib.util.module_from_spec(sp); ld.exec_module(m)
+open(HOME + "/.config/hypr/crt.lua", "w").write(m.crt_lua_text())
+inn("hyprctl", "reload"); time.sleep(1.5)
+verdict(plugins() and "crt-glass" not in (shader() or ""), f"a config reload binds no shader over the pass: {shader()!r}")
+dmg = inn("hyprctl", "getoption", "debug:damage_tracking").stdout.split()
+verdict("1" in dmg[:3], f"and keeps whole-monitor repaints: {dmg[:2]}")
+reloaded, _ = grab("reloaded")
+verdict(diff(on, reloaded, wh) < 0.05, "and the picture is unchanged, bent once")
+
+code, out = crt("native", "off")
+verdict(code == 0 and not plugins(), f"crt native off unloads the pass: {out.splitlines()[-1][:60]}")
+verdict("crt-glass" in (shader() or ""), f"and today's shader is back: {(shader() or '')[-24:]}")
+
+# A session that died with the pass on leaves its flag behind. It names a dead
+# session, so a reload must bind the shader as usual.
+flag = S + "/run/omarchy-crt-native"
+open(flag, "w").write("a-session-that-crashed\n")
+inn("hyprctl", "eval", 'hl.config({ decoration = { screen_shader = "" } })')
+inn("hyprctl", "reload"); time.sleep(1.5)
+verdict("crt-glass" in (shader() or ""), "a stale flag from a crashed session is ignored")
+code, out = crt("native", "status")
+verdict(out.endswith("off"), f"and crt agrees: {out}")
+os.unlink(flag)
+
+subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/target.qml"])
+print("FAILED" if fails else "PROVED", flush=True)
+sys.exit(1 if fails else 0)

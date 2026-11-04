@@ -7,6 +7,8 @@ hl.config({
 })
 -- A monitor with no screen has nothing asking it for frames, and a capture
 -- waits for one, so the test seat redraws continuously.
-hl.config({ debug = { damage_tracking = 0, disable_logs = false } })
+hl.config({ debug = { damage_tracking = 1, disable_logs = false } })
 -- The scene's floating window, by title.
+-- crt.lua, when a test has put one there, exactly as a real config requires it.
+pcall(dofile, os.getenv("HOME") .. "/.config/hypr/crt.lua")
 hl.window_rule({ name = "crt-float", match = { title = "float" }, float = true, size = { 700, 420 }, move = { 300, 200 } })

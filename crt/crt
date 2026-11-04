@@ -834,6 +834,9 @@ def tubes_once():
 
 def tubes_watch():
     """Follow the compositor and keep the rects true until interrupted."""
+    if native_active():
+        print("crt: the native pass owns the glass, so there is nothing to watch", flush=True)
+        return
     # SWITCHED OFF MEANS NOTHING RUNS. The unit is still enabled, so login
     # starts this whether or not the CRT is on; exiting 0 here is what keeps
     # it from binding anything, and Restart=on-failure leaves a clean exit be.
@@ -1293,6 +1296,86 @@ def is_crt_watch(pid):
             and args[-2:] == ["tubes", "watch"])
 
 
+# ---------------------------------------------------------------- native pass
+#
+# OPTIONAL, AND NEVER WRITTEN INTO THE CONFIG. The native pass is a Hyprland plugin
+# (native/ in this repository) that runs the same shader ahead of top and overlay
+# layers, so toasts and menus stay flat over curved tiles. It runs inside the
+# compositor, where a bug takes the desktop down, so it only ever lives in the
+# running session: the flag names that session, and a crash, a reboot or a new
+# login comes back on the screen shader with nothing to undo.
+NATIVE_DIR = STATE / "native"
+
+
+def native_flag():
+    return Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "omarchy-crt-native"
+
+
+def native_active():
+    """Does the native pass own the glass in THIS Hyprland session?"""
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    try:
+        return bool(sig) and native_flag().read_text().strip() == sig
+    except OSError:
+        return False
+
+
+def publish_native(st):
+    """What the pass reads instead of a compile: knobs, colours, clock and switch."""
+    lines = [f"{k} {v}" for k, v in expand(st).items()]
+    lines += [f"ANIMATED {1 if st.get('animated') else 0}", f"ON {1 if st['on'] else 0}"]
+    lines += [f"PASS {c}" for c in st.get("passthrough", []) if not re.search(r"\s", c)]
+    ch = theme_colours()
+    if ch is not None:
+        lines += ["PHOSPHOR %.3f %.3f %.3f" % tuple(ch[0]), "GLARE_TINT %.3f %.3f %.3f" % tuple(ch[1])]
+    tmp = NATIVE_DIR / "knobs.txt.new"
+    tmp.write_text("\n".join(lines) + "\n")
+    tmp.replace(NATIVE_DIR / "knobs.txt")
+
+
+def native_on():
+    plugin = NATIVE_DIR / "crt-pass.so"
+    if not plugin.exists():
+        die(f"no plugin at {plugin} — build it with native/build")
+    if native_active():
+        print("native pass: already on")
+        return
+    shutil.copy(TEMPLATE, NATIVE_DIR / "crt-glass.frag")
+    st = load()
+    # The flag goes first: a watcher or a reload racing this must already see it.
+    native_flag().write_text(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "") + "\n")
+    publish_native(st)
+    stop_watcher()
+    # Hyprland keeps an unloaded plugin mapped, so loading this path again in the same
+    # session reuses the old code, even after a rebuild. A new build needs a new session.
+    out = (hyprctl("plugin", "load", str(plugin)) or "").strip()
+    if out != "ok":
+        native_flag().unlink(missing_ok=True)
+        print(f"native pass refused, staying on the screen shader ({out[:120]}). "
+              "Rebuild it with native/build.", file=sys.stderr)
+        apply(st)
+        if st["on"]:
+            start_watcher()
+        raise SystemExit(1)
+    set_shader("")
+    preconditions(False, 1, force=True)
+    print("native pass: on")
+
+
+def native_off():
+    if not native_active():
+        print("native pass: already off")
+        return
+    hyprctl("plugin", "unload", str(NATIVE_DIR / "crt-pass.so"))
+    native_flag().unlink(missing_ok=True)
+    reset_preconditions()
+    st = load()
+    apply(st)
+    if st["on"]:
+        start_watcher()
+    print("native pass: off")
+
+
 def stop_watcher():
     if shutil.which("systemctl"):
         subprocess.run(["systemctl", "--user", "stop", "crt-tubes.service"],
@@ -1320,6 +1403,8 @@ def stop_watcher():
 
 
 def start_watcher():
+    if native_active():
+        return
     if shutil.which("systemctl") and UNIT.is_file():
         subprocess.run(["systemctl", "--user", "start", "crt-tubes.service"],
                        capture_output=True)
@@ -1358,6 +1443,9 @@ def power(on):
     # the other order protects against.
     save(st)
     refresh_crt_lua()
+    if native_active():
+        apply(st)       # the pass reads the switch from knobs.txt; there is no watch to move
+        return
     park_td_tubes()
     if on:
         # Flat glass now, the tubes as soon as the watch's first build lands.
@@ -1520,6 +1608,9 @@ def block_key(block):
 def apply(st, validate=True):
     write_passthrough()
     out = render(st, validate=validate)
+    if native_active():
+        publish_native(st)
+        return
     if not shutil.which("hyprctl"):
         print(f"wrote {out} — applies at next login (hyprctl not found)")
         return
@@ -1894,6 +1985,18 @@ def crt_lua_text():
 -- a reload binding the glass straight back would undo it on the next theme
 -- switch. While knobs.json says off this binds the plain passthrough instead,
 -- and asks for no damage tier, which leaves Hyprland's own.
+--
+-- AND THE NATIVE PASS OWNS THE GLASS WHILE IT IS LOADED. `crt native on` leaves a
+-- flag naming this Hyprland session, so a reload binds no shader over it, and asks
+-- for whole-monitor repaints, because the pass reads around every pixel it writes.
+-- The flag names the session so that a crash or a new login simply ignores it.
+local native = false
+local runtime = os.getenv("XDG_RUNTIME_DIR")
+local flag = runtime and io.open(runtime .. "/omarchy-crt-native", "r")
+if flag then
+  native = flag:read("*l") == os.getenv("HYPRLAND_INSTANCE_SIGNATURE")
+  flag:close()
+end
 local off = false
 local knobs = io.open("{KNOBS}", "r")
 if knobs then
@@ -1901,7 +2004,9 @@ if knobs then
   knobs:close()
 end
 local frag = "{SHADER}"
-if off then
+if native then
+  hl.config({{ debug = {{ damage_tracking = 1 }} }})
+elseif off then
   local plain = io.open("{PASSTHROUGH}", "r")
   if plain then
     plain:close()
@@ -2148,6 +2253,17 @@ def main(argv):
         commit(st)
         print("passthrough: " + (", ".join(cur) or "(nothing)"))
         print("  run `crt tubes` (or let the watcher tick) to re-emit the rects")
+        return
+    if cmd == "native":
+        sub = rest[0] if rest else "status"
+        if sub == "on":
+            native_on()
+        elif sub == "off":
+            native_off()
+        elif sub == "status":
+            print("native pass: " + ("on" if native_active() else "off"))
+        else:
+            die("native [on|off|status]")
         return
     if cmd == "tubes":
         if rest and rest[0] == "watch":

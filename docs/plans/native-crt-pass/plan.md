@@ -12,6 +12,8 @@ A Hyprland plugin runs the CRT after windows and before top and overlay layers, 
 - The optics currently read a frame copy. Bloom and aberration gather across tile edges, so the look may differ slightly from the screen shader's.
 - Whether a still desktop can still draw no frames with this pass in the chain is unmeasured.
 
+- Hyprland keeps an unloaded plugin mapped, so a rebuilt plugin only takes effect in a new session.
+
 ## Slices
 1. **The whole look.** Port crt-glass.frag with knobs as uniforms: glow, bloom, tracking, flicker, scanlines, convergence, phosphor from the theme. Done when a sealed frame matches the screen shader's on the same scene, and turning a knob compiles nothing.
 2. **The right pixels.** One stacking rule shared by the shader and the pointer: floating over tiled, fullscreen, Terminal Delight's own curve untouched, a window opted out. Done when each case has a pixel check and a click check.

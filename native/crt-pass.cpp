@@ -40,6 +40,16 @@
 #include <hyprland/protocols/wlr-layer-shell-unstable-v1.hpp>
 
 static HANDLE PHANDLE = nullptr;
+
+// The test seat's switches. A real build has none of this, and does not stat files
+// every frame.
+#ifdef CRT_RIG
+static bool rig(const char* name) {
+    return access((std::string(getenv("HOME")) + "/" + name).c_str(), F_OK) == 0;
+}
+#else
+static constexpr bool rig(const char*) { return false; }
+#endif
 static long   g_frames = 0, g_programs = 0;
 
 static const char* VS = R"(#version 320 es
@@ -65,6 +75,7 @@ struct SKnob {
 static std::vector<SKnob>       g_knobs;
 static std::vector<std::string> g_passthrough;     // window classes that keep their own picture
 static bool               g_animated = false;
+static bool               g_on       = true;
 
 static std::string pluginDir() {
     Dl_info i{};
@@ -136,6 +147,10 @@ static void readKnobs() {
             f >> g_animated;
             continue;
         }
+        if (name == "ON") {
+            f >> g_on;
+            continue;
+        }
         if (name == "PASS") {
             f >> name;
             g_passthrough.push_back(name);
@@ -149,6 +164,8 @@ static void readKnobs() {
             std::copy(v, v + 3, it->value);
     }
 }
+
+static std::string g_source;
 
 static GLuint build() {
     auto sh = [](GLenum t, const std::string& s) {
@@ -165,10 +182,9 @@ static GLuint build() {
         }
         return o;
     };
-    const auto frag = nativeSource();
-    GLuint     p    = glCreateProgram();
+    GLuint p = glCreateProgram();
     glAttachShader(p, sh(GL_VERTEX_SHADER, VS));
-    glAttachShader(p, sh(GL_FRAGMENT_SHADER, frag));
+    glAttachShader(p, sh(GL_FRAGMENT_SHADER, g_source));
     glLinkProgram(p);
     for (auto& k : g_knobs)
         k.loc = glGetUniformLocation(p, k.name.c_str());
@@ -247,7 +263,6 @@ class CCrtPass : public IPassElement {
         glUseProgram(g_prog);
         glBindVertexArray(g_vao);
         glBindTexture(GL_TEXTURE_2D, sc.tex);
-        readKnobs();
         for (auto const& k : g_knobs) {
             if (k.size == 3) glUniform3fv(k.loc, 1, k.value);
             else glUniform1f(k.loc, k.value[0]);
@@ -391,7 +406,7 @@ static SP<CWLSurfaceResource> hkLayerAt(void* self, const Vector2D& pos, std::ve
 }
 
 static std::optional<Vector2D> mapped(const Vector2D& p) {
-    if (access((std::string(getenv("HOME")) + "/input-flat").c_str(), F_OK) == 0)   // test rig: today's miss
+    if (rig("input-flat") || !g_on)
         return std::nullopt;
     for (auto const& m : State::monitorState()->monitors()) {
         if (!m->logicalBox().containsPoint(p))
@@ -438,9 +453,21 @@ APICALL EXPORT std::string PLUGIN_API_VERSION() { return HYPRLAND_API_VERSION; }
 
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     PHANDLE = handle;
+    // The hooks below are tied to this exact Hyprland. Refuse anything else, and
+    // `crt native on` falls back to the screen shader.
+#ifdef CRT_FORCE_MISMATCH
+    throw std::runtime_error("crt-pass: built for another Hyprland (forced)");
+#endif
+    if (std::string(__hyprland_api_get_hash()) != std::string(__hyprland_api_get_client_hash()))
+        throw std::runtime_error("crt-pass: built for another Hyprland, rebuild with native/build");
     g_positionHook = hookNamed("position", "CPointerManager::position", (void*)hkPosition);
     g_layerHook    = hookNamed("layerSurfaceAt", "CViewHitTester::layerSurfaceAt", (void*)hkLayerAt);
     g_moveHook     = hookNamed("mouseMoveUnified", "CInputManager::mouseMoveUnified", (void*)hkMove);
+    // Before anything draws, so the knob list exists when knobs.txt is first read.
+    g_source = nativeSource();
+    if (g_source.empty())
+        throw std::runtime_error("crt-pass: no crt-glass.frag beside the plugin");
+    readKnobs();
     g_stage = Event::bus()->m_events.render.stage.listen([](eRenderStage stage) {
         static long seen[8] = {};
         seen[stage & 7]++;
@@ -453,7 +480,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         // frame, so a waiting request keeps the seat drawing until it is served.
         // The clock wants the same. Damaged here, not through doLater, because a
         // queued lambda would outlive an unload.
-        if (stage == RENDER_POST && (g_animated || access((std::string(getenv("HOME")) + "/keep-drawing").c_str(), F_OK) == 0))
+        if (stage == RENDER_POST && ((g_animated && g_on) || rig("keep-drawing")))
             for (auto& mon : State::monitorState()->monitors())
                 g_pHyprRenderer->damageMonitor(mon);
         // A lone fullscreen window takes a shortcut that never reaches the stage this
@@ -465,14 +492,17 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         if (!m) return;
         // Test rig: this file moves the pass to after the layers, which is where
         // the screen shader sits, so one scene can show today beside the fix.
-        const std::string home = getenv("HOME");
-        const bool        late = access((home + "/pass-late").c_str(), F_OK) == 0;
-        // Test rig: this file stands the pass down, so today's screen shader can run alone.
-        if (access((home + "/pass-off").c_str(), F_OK) == 0) {
-        } else if (stage == (late ? RENDER_LAST_MOMENT : RENDER_POST_WINDOWS))
+        // Read here, not in the pass, because a stood-down pass never runs to read it.
+        if (stage == RENDER_POST_WINDOWS)
+            readKnobs();
+        // Test rig: pass-off stands the pass down so today's screen shader can run alone.
+        if (!g_on || rig("pass-off")) {
+        } else if (stage == (rig("pass-late") ? RENDER_LAST_MOMENT : RENDER_POST_WINDOWS))
             g_pHyprRenderer->m_renderPass.add(makeUnique<CCrtPass>(tubes(m)));
+#ifdef CRT_RIG
         if (stage == RENDER_LAST_MOMENT)
             g_pHyprRenderer->m_renderPass.add(makeUnique<CDump>());
+#endif
     });
     return {"crt-pass", "CRT below top and overlay layers (proof of concept)", "Parker Brown", "0.0.1"};
 }

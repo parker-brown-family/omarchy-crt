@@ -2,8 +2,7 @@
 # Rebuild the plugin, restart the seat, load it, start the test scene.  native/rig/scene <state-dir>
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"; S="$1"
-g++ -shared -fPIC -std=c++2b -O1 -Wno-c++11-narrowing -Wno-deprecated-declarations "$here/crt-pass.cpp" \
-  -o "$S/home/crt-pass.so" $(pkg-config --cflags hyprland pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon) -lGLESv2
+"$here/build" "$S/home/crt-pass.so" -DCRT_RIG
 rm -rf "$S/home/client"; cp -r "$here/rig/client" "$S/home/"
 X=/home/parker/Work/onn-omarchy/vendor/Hyprland/protocols/wlr-virtual-pointer-unstable-v1.xml
 wayland-scanner client-header "$X" "$S/home/vp.h"
@@ -12,5 +11,5 @@ gcc -O1 -I"$S/home" "$here/rig/vptr.c" "$S/home/vp.c" -o "$S/home/vptr" $(pkg-co
 "$here/rig/up" "$S"
 cp "$here/../crt/crt-glass.frag" "$S/home/crt-glass.frag"
 [[ -f "$S/home/knobs.txt" ]] || : >"$S/home/knobs.txt"
-timeout 6 "$S/in" hyprctl plugin load "$S/home/crt-pass.so" | tail -1
+[[ -n "${CRT_SEAT_NO_PLUGIN:-}" ]] || timeout 6 "$S/in" hyprctl plugin load "$S/home/crt-pass.so" | tail -1
 timeout 5 "$S/in" hyprctl dismissnotify >/dev/null || true

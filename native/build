@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Build the native pass against the installed Hyprland headers.
+#   native/build [out.so] [extra flags]
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+state="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/crt/native"
+out="${1:-$state/crt-pass.so}"; shift || true
+mkdir -p "$(dirname "$out")"
+g++ -shared -fPIC -std=c++2b -O2 -Wno-c++11-narrowing -Wno-deprecated-declarations "$here/crt-pass.cpp" -o "$out" \
+  $(pkg-config --cflags hyprland pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon) -lGLESv2 -ldl "$@"
+echo "built $out"

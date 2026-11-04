@@ -5,6 +5,9 @@ set -uo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"; S="$1"; bad=0
 seat() {
   rm -f "$S"/home/{pass-late,dump-now,input-flat,keep-drawing,vptr.fifo}
+  # Every seat starts clean: a crt.lua left by the owner test would bind today's
+  # shader at startup, on top of the pass, and bend everything twice.
+  rm -rf "$S/home/.state" "$S/home/.config/hypr"; rm -f "$S/run/omarchy-crt-native"
   pkill -f "[v]ptr $S" 2>/dev/null
   CRT_SEAT="$1" timeout 90 "$here/rig/scene" "$S" 2>&1 | grep -E " error|seat up|could not"
 }
@@ -21,6 +24,14 @@ seat "HEADLESS-1 2560x1600@60 1.6 0 0 0
 HEADLESS-2 1920x1080@60 1 3 1600 0"
 timeout 5 "$S/in" hyprctl dispatch 'hl.dsp.focus({ monitor = "HEADLESS-1" })' >/dev/null; prove both-1
 timeout 5 "$S/in" hyprctl dispatch 'hl.dsp.focus({ monitor = "HEADLESS-2" })' >/dev/null; prove both-2
+echo "== windows"; seat "HEADLESS-1 1600x900@60 1 0 0 0"
+timeout 140 "$here/rig/prove-windows" "$S" "$S/windows" 2>&1 | sed 's/^/    /' ; [[ ${PIPESTATUS[0]} -eq 0 ]] || bad=$((bad+1))
+owner() { # extra arg
+  CRT_SEAT_NO_PLUGIN=1 seat "HEADLESS-1 1600x900@60 1 0 0 0"
+  timeout 100 "$here/rig/prove-owner" "$S" "$S/owner" "$@" 2>&1 | sed 's/^/    /' ; [[ ${PIPESTATUS[0]} -eq 0 ]] || bad=$((bad+1))
+}
+echo "== owner"; owner
+echo "== owner, plugin built for another Hyprland"; owner refused
 pkill -f "[v]ptr $S" 2>/dev/null; pkill -f "^[H]yprland --config" 2>/dev/null
 echo "failed proofs: $bad"
 exit $bad
