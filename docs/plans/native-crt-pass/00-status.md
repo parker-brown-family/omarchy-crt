@@ -16,7 +16,7 @@ The gates collapsed because the two approvals so far were "Keep going! <3" and "
 - [x] Slice 2 — windows own the right pixels
 - [x] Slice 3 — one owner, an off switch and a way back
 - [ ] Slice 4 — everything that can go wrong, in the sealed seat (done: drag, scroll, lock, idle, GPU cost. Left: real Omarchy toasts, blur, X11, pointer lock, recording, hotplug, special workspaces, groups, pins)
-- [ ] Slice 5 — your desktop, opt-in
+- [ ] Slice 5 — your desktop, opt-in (tracer fired 2026-11-04: a real toast came out flat on the live desktop; Parker has not yet judged it)
 
 ## Notes for a fresh session
 Parker ruled on 2026-11-04 that losing scanlines on the bar is fine. The same is assumed for toasts and menus, because they are drawn after the CRT too. He has not said so about those two.
