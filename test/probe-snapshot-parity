@@ -39,9 +39,11 @@ case "$1" in
   monitors) cat "{SB}/monitors.json" ;;
   clients)  cat "{SB}/clients.json" ;;
   layers)   cat "{SB}/layers.json" ;;
+  getprop)  jq --arg p "$3" \'{{($p): .[$p]}}\' "{SB}/props.json" ;;
 esac
 """)
 stub.chmod(0o755)
+(SB / "props.json").write_text(json.dumps({"border_size": 0, "decorate": True}))
 os.environ.update(PATH=f"{SB / 'bin'}:{os.environ['PATH']}", HOME=str(SB),
                   XDG_STATE_HOME=str(SB / "state"))
 os.environ.pop("HYPRLAND_INSTANCE_SIGNATURE", None)    # the hyprctl path, on purpose
@@ -132,6 +134,51 @@ try:
             verdict("1" in flags.split(", "), "and the passthrough class is flagged")
             verdict(all((m == "0") == (q == "0") for m, q in zip(mon.split(", "), quiet.split(", "))),
                     "and the unfocused monitor goes quiet")
+
+    # A floating video stays above both tiled windows when focus leaves it.
+    # Check pixel ownership, not just parity: two equally wrong paths still match.
+    for floating_focus in (0, 2):
+        video = client(7, 400, 200, 900, 600, cls="mpv", floating=True)
+        video["focusHistoryID"] = floating_focus
+        left = client(8, 10, 40, 940, 1000, cls="left-tile")
+        left["focusHistoryID"] = 1 if floating_focus == 0 else 0
+        right = client(9, 960, 40, 950, 1000, cls="right-tile")
+        right["focusHistoryID"] = 3
+        (SB / "monitors.json").write_text(json.dumps(
+            [monitor(0, "A", 1920, 1080, focused=True)]))
+        (SB / "clients.json").write_text(json.dumps([left, right, video]))
+        (SB / "layers.json").write_text("{}")
+        rows = crt.tube_rows()
+        for x in (500, 1100):
+            owner = next(r["class"] for r in rows
+                         if r["x"] <= x <= r["x"] + r["w"]
+                         and r["y"] <= 400 <= r["y"] + r["h"])
+            verdict(owner == "mpv",
+                    f"{'active' if floating_focus == 0 else 'inactive'} float owns pixel ({x},400)",
+                    f"owner: {owner}")
+        verdict(theirs_only(crt.td_tubes_block()) == bash_block(),
+                "floating ownership also agrees with the geometry block")
+
+    # Border pixels are outside clients.at/size. They must belong to the float,
+    # not to a tile underneath, and rule overrides must be measured per window.
+    (SB / "props.json").write_text(json.dumps({"border_size": 2, "decorate": True}))
+    framed = next(r for r in crt.tube_rows() if r["class"] == "mpv")
+    verdict((framed["x"], framed["y"], framed["w"], framed["h"]) == (398, 198, 904, 604),
+            "the float claims its complete two-pixel border", str(framed))
+    (SB / "monitors.json").write_text(json.dumps(
+        [monitor(0, "A", 1920, 1080, scale=1.5, transform=3, focused=True)]))
+    rotated = next(r for r in crt.tube_rows() if r["class"] == "mpv")
+    verdict((rotated["x"], rotated["y"], rotated["w"], rotated["h"]) == (717, 597, 906, 1356),
+            "the border is scaled and rotated with its float", str(rotated))
+    (SB / "monitors.json").write_text(json.dumps(
+        [monitor(0, "A", 1920, 1080, focused=True)]))
+    (SB / "props.json").write_text(json.dumps({"border_size": 2, "decorate": False}))
+    bare_float = next(r for r in crt.tube_rows() if r["class"] == "mpv")
+    verdict((bare_float["x"], bare_float["w"]) == (400, 900),
+            "an undecorated float gains no invented border")
+    (SB / "props.json").write_text(json.dumps({"border_size": None, "decorate": True}))
+    verdict(crt.tube_rows() is None, "an unknown border is not treated as zero")
+    (SB / "props.json").write_text(json.dumps({"border_size": 0, "decorate": True}))
 
     # A toast's host surface covers the monitor and must leave the tiles alone.
     # The freeze covers it too and must keep its flat claim: a capture is already
