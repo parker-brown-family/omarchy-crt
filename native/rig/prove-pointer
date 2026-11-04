@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Does a click land on what the screen shows?  prove-pointer <state-dir> <out-dir>
+
+Each target is drawn by the tile at a known place in its own coordinates. The warp
+moves it on screen, so this works out where it appears, puts a real virtual pointer
+there, clicks, and reads back where the tile says the click landed. It fails unless
+every click lands on its target, a card takes a click where it is drawn, a point
+beside a card that maps under it still reaches the tile, and turning the mapping off misses, which
+shows the test can fail and measures by how much.
+"""
+import os, re, subprocess, sys, time
+S, OUT = sys.argv[1], sys.argv[2]
+HOME = S + "/home"; HERE = os.path.dirname(os.path.abspath(__file__)); FIFO = HOME + "/vptr.fifo"
+K1, K2 = 0.26, 0.11
+os.makedirs(OUT, exist_ok=True)
+fails = 0
+def verdict(ok, text):
+    global fails
+    fails += 0 if ok else 1
+    print(f"  {'ok  ' if ok else 'FAIL'} {text}", flush=True)
+def spawn(args, log):
+    return subprocess.Popen([S + "/in", *args], stdout=open(log, "w"), stderr=subprocess.STDOUT, start_new_session=True)
+def client(name):
+    return spawn(["env", "QT_QPA_PLATFORM=wayland", "QS_NO_RELOAD_POPUP=1", "QT_FORCE_STDERR_LOGGING=1", "quickshell", "-p", f"{HOME}/client/{name}.qml"], f"{HOME}/{name}.log")
+def send(line):
+    with open(FIFO, "w") as f: f.write(line + "\n")
+def clicks(name):
+    return re.findall(r"CLICK (\w+) (-?[\d.]+) (-?[\d.]+)", open(f"{HOME}/{name}.log", errors="replace").read())
+def warp(l):
+    c = (l[0] - .5, l[1] - .5); r2 = c[0]**2 + c[1]**2; k = 1 + K1*r2 + K2*r2*r2
+    return (.5 + c[0]*k, .5 + c[1]*k)
+def unwarp(src):
+    """The tile position that shows source `src`: W is what the shader gathers."""
+    p = list(src)
+    for _ in range(60):
+        w = warp(p); p[0] += src[0] - w[0]; p[1] += src[1] - w[1]
+    return p
+def click_at(x, y, who):
+    n = len(clicks(who))
+    send(f"move {round(x)} {round(y)}"); time.sleep(0.15); send("click")
+    for _ in range(40):
+        got = clicks(who)
+        if len(got) > n: return got[-1]
+        time.sleep(0.05)
+    return None
+
+open(HOME + "/keep-drawing", "w").close()
+try: os.unlink(HOME + "/input-flat")
+except OSError: pass
+for name in ("tile", "tile2", "toast", "target"):
+    subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/{name}.qml"])
+time.sleep(1)
+spawn([HOME + "/vptr", FIFO], HOME + "/vptr.log"); client("target")
+for _ in range(60):
+    c = subprocess.run([S + "/in", "hyprctl", "clients", "-j"], capture_output=True, text=True).stdout
+    if '"class"' in c and os.path.exists(FIFO): break
+    time.sleep(0.25)
+import json
+win = json.loads(subprocess.run([S + "/in", "hyprctl", "clients", "-j"], capture_output=True, text=True).stdout)[0]
+X, Y = win["at"]; W, H = win["size"]
+print(f"  tile at {X},{Y} size {W}x{H}", flush=True)
+TARGETS = {"top left": (110, 90), "bottom left": (110, 770), "bottom right": (1450, 770), "centre": (780, 430)}
+def run(label):
+    misses = {}
+    for name, (tx, ty) in TARGETS.items():
+        lx, ly = unwarp((tx / W, ty / H))
+        got = click_at(X + lx * W, Y + ly * H, "target")
+        misses[name] = None if got is None else ((float(got[1]) - tx)**2 + (float(got[2]) - ty)**2) ** .5
+    print(f"  {label}: " + ", ".join(f"{k} {'no click' if v is None else f'{v:.1f} px'}" for k, v in misses.items()), flush=True)
+    return misses
+hit = run("mapped  ")
+verdict(all(v is not None and v <= 3 for v in hit.values()), "every click lands on the target you see")
+open(HOME + "/input-flat", "w").close()
+miss = run("unmapped")
+os.unlink(HOME + "/input-flat")
+worst = max(v for v in miss.values() if v is not None)
+verdict(worst > 10, f"without the mapping clicks miss, by up to {worst:.0f} px, so this test can fail")
+
+client("toast")
+for _ in range(40):
+    if "omarchy-notifications" in subprocess.run([S + "/in", "hyprctl", "layers", "-j"], capture_output=True, text=True).stdout: break
+    time.sleep(0.25)
+time.sleep(1.5)
+got = click_at(1350, 80, "toast")
+verdict(got is not None and abs(float(got[1]) - 1350) <= 2 and abs(float(got[2]) - 80) <= 2,
+        f"a flat card takes a click where it is drawn: {got}")
+# Just left of the card column, where the mapping carries the position under a
+# card. The pointer is not on a card, so the tile must get it, at the mapped place.
+px, py = 1132, 80
+sx, sy = warp(((px - X) / W, (py - Y) / H))
+sx, sy = X + sx * W, Y + sy * H
+verdict(sx > 1140, f"this point really does map under the column ({px} goes to {sx:.0f}; cards start at 1140)")
+n = len(clicks("toast"))
+got = click_at(px, py, "target")
+ok = got is not None and len(clicks("toast")) == n and abs(float(got[1]) + X - sx) <= 3 and abs(float(got[2]) + Y - sy) <= 3
+verdict(ok, f"beside a card the click reaches the tile, not the card: {got}")
+lx, ly = unwarp((110 / W, 90 / H))
+send(f"move {round(X + lx * W)} {round(Y + ly * H)}"); time.sleep(0.6)
+subprocess.run([HERE + "/shot", S, OUT + "/5-pointer-on-target.png"], capture_output=True, timeout=15)
+for name in ("target", "toast"):
+    subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/{name}.qml"])
+print("FAILED" if fails else "PROVED", flush=True)
+sys.exit(1 if fails else 0)

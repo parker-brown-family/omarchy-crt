@@ -24,6 +24,10 @@ ShellRoot {
           width: 420; height: 78; radius: 14
           color: Qt.rgba(0.05, 0.05, 0.07, 0.62)
           border.color: "#f0e6c8"; border.width: 2
+          MouseArea {
+            anchors.fill: parent
+            onClicked: function(m) { var g = mapToItem(null, m.x, m.y); console.log("CLICK card", g.x, g.y) }
+          }
           Text { x: 18; y: 14; color: "#ffffff"; font.pixelSize: 19; font.bold: true; text: "Screenshot saved to clipboard" }
           Text { x: 18; y: 44; color: "#d8d8d8"; font.pixelSize: 15; text: "Flat card, translucent, over a curved tile" }
         }

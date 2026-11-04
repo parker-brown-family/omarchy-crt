@@ -6,7 +6,10 @@
 // tile, and Hyprland draws them as usual. Tile rects are uniforms read from the
 // compositor every frame, so a layout change never compiles anything.
 #include <GLES3/gl32.h>
+#include <algorithm>
+#include <cmath>
 #include <fstream>
+#include <stdexcept>
 #include <unistd.h>
 #include <cstdlib>
 #include <hyprland/src/plugins/PluginAPI.hpp>
@@ -19,8 +22,15 @@
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/state/MonitorState.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
+#include <hyprland/src/managers/input/InputManager.hpp>
+#include <hyprland/src/pointer/PointerManager.hpp>
+#include <hyprland/src/desktop/state/ViewStateTracker.hpp>
+#include <hyprland/src/desktop/state/ViewHitTester.hpp>
+#include <hyprland/src/desktop/view/LayerSurface.hpp>
+#include <hyprland/protocols/wlr-layer-shell-unstable-v1.hpp>
 
 static HANDLE PHANDLE = nullptr;
+static constexpr double K1 = 0.26, K2 = 0.11;    // the shader's, and they must agree
 static long   g_frames = 0, g_programs = 0;
 
 static const char* VS = R"(#version 300 es
@@ -203,12 +213,86 @@ static std::vector<std::array<float, 4>> tubes(PHLMONITOR m) {
     return out;
 }
 
+// THE POINTER. The picture now bends and the pointer does not, so a pixel on
+// screen shows the source the shader gathers for it, and a click must land there.
+// The move routine is the one place hit-testing happens, so only while it runs
+// does "where is the pointer" answer with the mapped position. The drawn cursor,
+// drags and keybinds keep the true one. Flat layers are hit where they are drawn.
+// (overridePos looks like the tool for this and is not: it skips sending motion.)
+static CFunctionHook*          g_positionHook = nullptr;
+static CFunctionHook*          g_moveHook     = nullptr;
+static std::optional<Vector2D> g_mapped;
+
+static CFunctionHook*          g_layerHook    = nullptr;
+
+typedef Vector2D (*origPosition)(void*);
+typedef SP<CWLSurfaceResource> (*origLayerAt)(void*, const Vector2D&, std::vector<PHLLSREF>*, Vector2D*, PHLLS*, bool);
+typedef void (*origMove)(void*, uint32_t, bool, bool, std::optional<Vector2D>);
+
+static Vector2D hkPosition(void* self) {
+    return g_mapped ? *g_mapped : ((origPosition)g_positionHook->m_original)(self);
+}
+
+// A mapped move has already found no layer under the true position. Asked again
+// with the mapped one, a pointer in the gap between two cards would hit a card.
+static SP<CWLSurfaceResource> hkLayerAt(void* self, const Vector2D& pos, std::vector<PHLLSREF>* layers, Vector2D* coords, PHLLS* found, bool lock) {
+    if (g_mapped)
+        return nullptr;
+    return ((origLayerAt)g_layerHook->m_original)(self, pos, layers, coords, found, lock);
+}
+
+static std::optional<Vector2D> mapped(const Vector2D& p) {
+    if (access((std::string(getenv("HOME")) + "/input-flat").c_str(), F_OK) == 0)   // test rig: today's miss
+        return std::nullopt;
+    for (auto const& m : State::monitorState()->monitors()) {
+        if (!m->logicalBox().containsPoint(p))
+            continue;
+        Vector2D coords;
+        PHLLS    layer;
+        for (auto const lvl : {ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, ZWLR_LAYER_SHELL_V1_LAYER_TOP})
+            if (Desktop::viewState()->hitTest().layerSurfaceAt(p, &m->m_layerSurfaceLayers[lvl], &coords, &layer))
+                return std::nullopt;
+        for (auto const& w : Desktop::windowState()->windows()) {
+            if (!w->m_isMapped || w->isHidden() || w->m_monitor.lock() != m)
+                continue;
+            const auto pos = w->positionAnimation()->value(), size = w->sizeAnimation()->value();
+            const auto c = (p - pos) / size - Vector2D{0.5, 0.5};
+            if (std::abs(c.x) > 0.5 || std::abs(c.y) > 0.5)
+                continue;
+            const double r2 = c.x * c.x + c.y * c.y, k = 1.0 + K1 * r2 + K2 * r2 * r2;
+            const double x = std::clamp(0.5 + c.x * k, 0.0, 0.999), y = std::clamp(0.5 + c.y * k, 0.0, 0.999);
+            return pos + Vector2D{x, y} * size;
+        }
+    }
+    return std::nullopt;
+}
+
+static void hkMove(void* self, uint32_t time, bool refocus, bool mouse, std::optional<Vector2D> override_) {
+    if (!override_)
+        g_mapped = mapped(((origPosition)g_positionHook->m_original)(Pointer::mgr().get()));
+    ((origMove)g_moveHook->m_original)(self, time, refocus, mouse, override_);
+    g_mapped.reset();
+}
+
+static CFunctionHook* hookNamed(const std::string& name, const std::string& demangledHas, void* to) {
+    for (auto const& f : HyprlandAPI::findFunctionsByName(PHANDLE, name))
+        if (f.demangled.contains(demangledHas)) {
+            auto* h = HyprlandAPI::createFunctionHook(PHANDLE, f.address, to);
+            if (h && h->hook())
+                return h;
+        }
+    throw std::runtime_error("crt-pass: cannot hook " + name);
+}
+
 static CHyprSignalListener g_stage;
 
 APICALL EXPORT std::string PLUGIN_API_VERSION() { return HYPRLAND_API_VERSION; }
 
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     PHANDLE = handle;
+    g_positionHook = hookNamed("position", "CPointerManager::position", (void*)hkPosition);
+    g_layerHook    = hookNamed("layerSurfaceAt", "CViewHitTester::layerSurfaceAt", (void*)hkLayerAt);
+    g_moveHook     = hookNamed("mouseMoveUnified", "CInputManager::mouseMoveUnified", (void*)hkMove);
     g_stage = Event::bus()->m_events.render.stage.listen([](eRenderStage stage) {
         static long seen[8] = {};
         seen[stage & 7]++;
@@ -237,4 +321,4 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     return {"crt-pass", "CRT below top and overlay layers (proof of concept)", "Parker Brown", "0.0.1"};
 }
 
-APICALL EXPORT void PLUGIN_EXIT() { g_stage.reset(); }
+APICALL EXPORT void PLUGIN_EXIT() { g_stage.reset(); g_mapped.reset(); }

@@ -16,5 +16,11 @@ native/rig/scene /tmp/crt-seat
 ```bash
 native/rig/prove /tmp/crt-seat /tmp/crt-seat/out
 ```
+```bash
+native/rig/prove-pointer /tmp/crt-seat /tmp/crt-seat/out
+```
+
+Unloading the plugin from a running Hyprland crashes it (seen 2026-11-04, cause not
+diagnosed), so restart the seat rather than reloading.
 
 Run on an NVIDIA box. `rig/headless-gpu.cpp` hardcodes the render node path.
