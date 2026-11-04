@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Every suite that needs no GPU, judged by exit code. This is what CI runs and what to
+# run before a push. The GPU proofs are native/rig/matrix.
+cd "$(dirname "$0")/.." || exit 1
+bad=0
+for t in test/run test/probe-snapshot-parity test/probe-silent-resize test/probe-fullscreen-layer; do
+  if ./"$t" >/tmp/crt-test-all.$$ 2>&1; then
+    echo "ok    $t"
+  else
+    echo "FAIL  $t"
+    grep -E 'FAIL|Traceback' /tmp/crt-test-all.$$ | head -20
+    bad=$((bad + 1))
+  fi
+done
+rm -f /tmp/crt-test-all.$$
+exit "$bad"

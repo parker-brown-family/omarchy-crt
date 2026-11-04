@@ -133,6 +133,10 @@ def request(conn):         # .socket.sock: one request, one answer, close
         conn.sendall(json.dumps(MON).encode())
     elif q.endswith(b"layers"):
         conn.sendall(b"{}")
+    elif q.endswith(b"decorate"):
+        conn.sendall(b'{"decorate": true}')
+    elif q.endswith(b"border_size"):
+        conn.sendall(b'{"border_size": 0}')
     conn.close()
 
 

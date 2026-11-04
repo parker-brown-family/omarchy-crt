@@ -30,19 +30,8 @@ jobs:
       - name: deps
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq glslang-tools shellcheck
 
-      - name: run the tests
-        run: ./test/run
-
-      # The watch lifts the geometry's jq program out and does `cap` and
-      # `emit_block` itself, so the two must bake the same block.
-      - name: the fast snapshot matches the geometry
-        run: ./test/probe-snapshot-parity
-
-      # A tile resize posts no Hyprland event, so the watch polls the rects, and
-      # a fatal watch must not exit 0. The probe drives the real watcher over
-      # fake sockets that stay silent.
-      - name: a silent resize moves the tube, and a dead watch says so
-        run: ./test/probe-silent-resize
+      - name: run every suite
+        run: ./test/all
 
       # Prove the suite can FAIL. A green suite is only evidence if a known
       # break turns it red: test/run once passed with a shader constant renamed.
@@ -89,4 +78,4 @@ jobs:
       # bin/sync-tubes-geometry is Python, not shell, and shellcheck refuses
       # it outright (SC1071) rather than skipping it.
       - name: shellcheck the scripts
-        run: shellcheck -S warning bin/shoot test/run native/sandbox native/build native/rig/up native/rig/scene native/rig/matrix
+        run: shellcheck -S warning bin/shoot test/run test/all native/sandbox native/build native/rig/up native/rig/scene native/rig/matrix
