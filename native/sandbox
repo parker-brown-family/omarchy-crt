@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Run a command inside the sealed test seat: a sandbox that CANNOT reach the live
+# desktop. Hyprland 0.56.2 has no headless-only switch (its source says
+# "TODO: headless only") and tries the real display whenever a seat answers, so
+# isolation here is a matter of removing the seat, not of asking nicely:
+# no /dev/dri/card*, no /dev/input, no /run (so no logind bus, no seatd, no
+# live Wayland socket), and no input of any kind. The GPU's render node is the
+# only device passed in.
+#
+#   native/sandbox <state-dir> <command...>
+set -euo pipefail
+state="$1"; shift
+mkdir -p "$state/run" "$state/home"
+gpu=()
+for d in /dev/dri/renderD128 /dev/nvidia-caps /dev/nvidia0 /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools; do
+  [[ -e $d ]] && gpu+=(--dev-bind "$d" "$d")
+done
+exec bwrap --ro-bind / / --dev /dev "${gpu[@]}" --proc /proc \
+  --tmpfs /run --bind "$state/run" /run/user/1000 \
+  --tmpfs /tmp --bind "$state/home" "$state/home" \
+  --unshare-pid --unshare-ipc \
+  --clearenv --setenv PATH /usr/bin --setenv HOME "$state/home" \
+  --setenv XDG_RUNTIME_DIR /run/user/1000 --setenv XDG_CONFIG_HOME "$state/home/.config" \
+  --setenv XDG_CACHE_HOME "$state/home/.cache" --setenv XDG_STATE_HOME "$state/home/.state" \
+  --setenv LIBSEAT_BACKEND noop --setenv XDG_SESSION_TYPE wayland \
+  "$@"

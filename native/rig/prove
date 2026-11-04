@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Prove flat toasts over a curved tile, in the sealed seat.  prove <state-dir> <out-dir>
+
+Fails unless: the toast leaves every pixel outside its cards unchanged; inside a
+card the frame equals the card composited over the curved tile (the oracle, built
+from a frame with no toast, so the bug cannot hide in it); a new tile and a toast
+cost no shader compile; and moving the pass to after the layers, where today's
+screen shader sits, breaks the oracle, which shows this test can fail.
+"""
+import os, struct, subprocess, sys, time, zlib
+S, OUT = sys.argv[1], sys.argv[2]
+HOME = S + "/home"
+HERE = os.path.dirname(os.path.abspath(__file__))
+os.makedirs(OUT, exist_ok=True)
+fails = 0
+def verdict(ok, text):
+    global fails
+    fails += 0 if ok else 1
+    print(f"  {'ok  ' if ok else 'FAIL'} {text}", flush=True)
+def client(name):
+    return subprocess.Popen([S + "/in", "env", "QT_QPA_PLATFORM=wayland", "QS_NO_RELOAD_POPUP=1",
+                             "quickshell", "-p", f"{HOME}/client/{name}.qml"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+def settle(tiles, toasts):
+    """Wait until the seat shows what the scene asked for."""
+    for _ in range(80):
+        c = subprocess.run([S + "/in", "hyprctl", "clients", "-j"], capture_output=True, text=True).stdout
+        l = subprocess.run([S + "/in", "hyprctl", "layers", "-j"], capture_output=True, text=True).stdout
+        if c.count('"class"') >= tiles and l.count("omarchy-notifications") >= toasts:
+            return
+        time.sleep(0.25)
+    sys.exit("the scene never appeared")
+def stop(name):
+    subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/{name}.qml"])
+def shot(name):
+    time.sleep(1.2)
+    out = subprocess.run([HERE + "/shot", S, f"{OUT}/{name}.png"], capture_output=True, text=True, timeout=15)
+    if out.returncode: sys.exit(out.stderr)
+    meta = out.stdout.split()
+    w, h = int(meta[0]), int(meta[1])
+    programs = int(meta[3].split("=")[1])
+    return open(HOME + "/frame.rgba", "rb").read(), w, h, programs
+CARDS = [(1600 - 40 - 420, 40 + i * 88, 420, 78) for i in range(3)]   # toast.qml's own numbers
+ALPHA, CARD = 0.62, (0.05, 0.05, 0.07)
+def inside(x, y, pad=0):
+    return any(cx - pad <= x < cx + cw + pad and cy - pad <= y < cy + ch + pad for cx, cy, cw, ch in CARDS)
+
+open(HOME + "/keep-drawing", "w").close()
+for name in ("tile", "tile2", "toast"):
+    stop(name)
+time.sleep(1)
+client("tile"); settle(1, 0)
+base, w, h, p0 = shot("1-tile-alone")
+client("toast"); settle(1, 1)
+with_toast, _, _, p1 = shot("2-toast-flat-over-curve")
+
+changed = sum(1 for y in range(0, h, 2) for x in range(0, w, 2)
+              if not inside(x, y, 4) and base[(y*w+x)*4:(y*w+x)*4+3] != with_toast[(y*w+x)*4:(y*w+x)*4+3])
+verdict(changed == 0, f"outside the cards the toast changed {changed} sampled pixels")
+
+def oracle(frame):
+    """Worst and mean error between a frame and card-over-curved-tile, in 0-255."""
+    errs = []
+    for cx, cy, cw, ch in CARDS:
+        for y in range(cy + 6, cy + ch - 6, 3):
+            for x in range(cx + 300, cx + cw - 10, 3):    # right of the text
+                i = (y*w+x)*4
+                for c in range(3):
+                    want = ALPHA * CARD[c] * 255 + (1 - ALPHA) * base[i+c]
+                    errs.append(abs(want - frame[i+c]))
+    return max(errs), sum(errs) / len(errs)
+worst, mean = oracle(with_toast)
+verdict(mean < 2.5, f"inside a card the frame matches card-over-curved-tile (mean error {mean:.2f}/255, worst {worst:.0f})")
+
+client("tile2"); settle(2, 1)
+two, _, _, p2 = shot("3-new-tile-opened-live")
+verdict(two != with_toast, "opening a second tile changed the picture")
+verdict(p0 == p1 == p2 == 1, f"shader compiles across tile, toast and new tile: {p2} (want 1, the first frame)")
+stop("tile2")
+
+open(HOME + "/pass-late", "w").close()
+late, _, _, _ = shot("4-today-pass-after-toasts")
+os.unlink(HOME + "/pass-late")
+_, late_mean = oracle(late)
+verdict(late_mean > mean * 3, f"with the pass after the toasts, as today, the oracle breaks (mean error {late_mean:.2f}/255)")
+stop("toast"); stop("tile")
+print("FAILED" if fails else "PROVED", flush=True)
+sys.exit(1 if fails else 0)

@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""Ask the plugin for the finished frame and write a PNG.  shot <state-dir> <out.png>"""
+import os, struct, sys, time, zlib
+S, out = sys.argv[1], sys.argv[2]
+home = S + "/home"
+for f in ("frame.rgba", "frame.txt"):
+    try: os.unlink(f"{home}/{f}")
+    except OSError: pass
+open(f"{home}/dump-now", "w").close()
+for _ in range(100):
+    if os.path.exists(f"{home}/frame.txt") and not os.path.exists(f"{home}/dump-now"): break
+    time.sleep(0.05)
+else:
+    sys.exit("no frame came back: the compositor is not drawing")
+time.sleep(0.1)
+meta = open(f"{home}/frame.txt").read().split()
+w, h = int(meta[0]), int(meta[1])
+px = open(f"{home}/frame.rgba", "rb").read()
+rows = [px[y*w*4:(y+1)*w*4] for y in range(h)]   # top-down, like the framebuffer
+raw = b"".join(b"\0" + r for r in rows)
+def chunk(t, d): return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
+open(out, "wb").write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+                      + chunk(b"IDAT", zlib.compress(raw, 3)) + chunk(b"IEND", b""))
+print(" ".join(meta))

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Rebuild the plugin, restart the seat, load it, start the test scene.  native/rig/scene <state-dir>
+set -euo pipefail
+here="$(cd "$(dirname "$0")/.." && pwd)"; S="$1"
+g++ -shared -fPIC -std=c++2b -O1 -Wno-c++11-narrowing -Wno-deprecated-declarations "$here/crt-pass.cpp" \
+  -o "$S/home/crt-pass.so" $(pkg-config --cflags hyprland pixman-1 libdrm pangocairo libinput libudev wayland-server xkbcommon) -lGLESv2
+rm -rf "$S/home/client"; cp -r "$here/rig/client" "$S/home/"
+"$here/rig/up" "$S"
+timeout 6 "$S/in" hyprctl plugin load "$S/home/crt-pass.so" | tail -1
+timeout 5 "$S/in" hyprctl dismissnotify >/dev/null || true

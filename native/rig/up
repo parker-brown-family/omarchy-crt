@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Start the sealed test Hyprland.  native/rig/up <state-dir> [plugin.so]
+set -euo pipefail
+here="$(cd "$(dirname "$0")/.." && pwd)"; S="$1"
+pkill -f "[H]yprland --config $S" 2>/dev/null || pkill -f "[H]yprland --config .HOME/hypr.lua" 2>/dev/null || true
+sleep 1
+rm -rf "$S/run/hypr" "$S"/run/wayland-*; mkdir -p "$S/run/hypr" "$S/home"
+cp "$here/rig/hypr.lua" "$S/home/hypr.lua"
+g++ -shared -fPIC -O1 -std=c++23 -o "$S/home/headless-gpu.so" "$here/rig/headless-gpu.cpp" \
+  $(pkg-config --cflags --libs gbm libdrm aquamarine hyprutils pixman-1)
+setsid nohup "$here/sandbox" "$S" bash -c \
+  'LD_PRELOAD=$HOME/headless-gpu.so Hyprland --config $HOME/hypr.lua >$HOME/hypr.log 2>&1' \
+  >"$S/home/sbx.out" 2>&1 </dev/null &
+for _ in $(seq 1 40); do ls "$S"/run/hypr/*/.socket.sock >/dev/null 2>&1 && break; sleep 0.25; done
+sig="$(ls -t "$S/run/hypr" | head -1)"
+cat >"$S/in" <<IN
+#!/usr/bin/env bash
+exec $here/sandbox $S env WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE=$sig "\$@"
+IN
+chmod +x "$S/in"
+sleep 1; timeout 5 "$S/in" hyprctl output create headless HEADLESS-1 >/dev/null; sleep 1
+timeout 5 "$S/in" hyprctl monitors -j | python3 -c 'import json,sys;print("seat up:",[(m["name"],m["width"],m["height"]) for m in json.load(sys.stdin)])'
