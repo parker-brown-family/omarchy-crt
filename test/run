@@ -971,6 +971,49 @@ done
 check "every action is pinned to a commit, and every workflow says what it may touch" \
   "$WF_BAD" "0"
 
+
+echo
+echo "the shipped shader's names are pinned"
+# ---------------------------------------------------------------------------
+# The suite used to pass with a shader constant RENAMED, because it checked a
+# handful of VALUES and never the set of NAMES. The renderer drives constants by
+# name — known_knobs is every scalar `const float NAME =`, and the PANEL macros
+# reach specific ones — so a rename silently breaks `crt set` with every test
+# green. A value or a comment may change freely; a rename or a drop may not, and
+# the fix for one is to update this list on purpose. CI plants a rename in the
+# real file to prove this goes red.
+# ---------------------------------------------------------------------------
+KNOBS_EXPECTED="ABERR BAND_H BLOOM BRIGHTNESS CONTRAST CURV FLICKER GAMMA GLARE GLOW JIGGLE K1 K2 LINES SATURATION SCAN SCAN_STEP SPECULAR TRACKING TRACK_REST TRACK_SWEEP TUBE_K1 TUBE_K2 VIGN"
+knobs_got="$(grep -oE '^const float [A-Z_0-9]+ *=' "$TEMPLATE" | sed -E 's/^const float ([A-Z_0-9]+).*/\1/' | sort | tr '\n' ' ' | sed 's/ $//')"
+check "the template declares exactly the const-float names the renderer drives" \
+  "$knobs_got" "$KNOBS_EXPECTED"
+check "the two colour constants are present by name" \
+  "$(grep -cE '^const vec3  (PHOSPHOR|GLARE_TINT) ' "$TEMPLATE")" "2"
+check "the two managed #defines are present by name" \
+  "$(grep -cE '^#define (ANIMATED|TUBE_COUNT) ' "$TEMPLATE")" "2"
+check "the shader keeps its required uniforms" \
+  "$(grep -cE '^uniform (sampler2D tex|int wl_output);' "$TEMPLATE")" "2"
+
+echo
+echo "the tray leads with the power button"
+# ---------------------------------------------------------------------------
+# QML cannot load here without the shell, so these read the source for the two
+# promises a person would see broken: the switch is above the dials, and it is a
+# button rather than a strip with a label on it. Drawn and judged by eye in
+# PowerButton.qml's own render; this stops it sliding back.
+# ---------------------------------------------------------------------------
+PANEL="$REPO/Panel.qml"
+hero_line="$(grep -n 'PanelHero {' "$PANEL" | head -1 | cut -d: -f1)"
+button_line="$(grep -n 'PowerButton {' "$PANEL" | head -1 | cut -d: -f1)"
+knobs_line="$(grep -n 'key: "BARREL",' "$PANEL" | head -1 | cut -d: -f1)"
+check "the power button sits beside the hero" \
+  "$(( button_line > hero_line && button_line - hero_line < 15 ))" "1"
+check "and above the dials" "$(( button_line < knobs_line ))" "1"
+check "the old POWER strip is gone" "$(grep -c '"POWER ON"' "$PANEL")" "0"
+check "the button is a real file beside the panel" "$(test -f "$REPO/PowerButton.qml" && echo yes)" "yes"
+check "and pulls no shell module in, so it can be drawn alone" \
+  "$(grep -c '^import q[s]' "$REPO/PowerButton.qml")" "0"
+
 echo
 echo "  $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

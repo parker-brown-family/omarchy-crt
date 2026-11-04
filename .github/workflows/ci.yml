@@ -33,10 +33,30 @@ jobs:
       - name: run the tests
         run: ./test/run
 
-      # A tile resize posts no Hyprland event, so the watch polls the rects.
-      # The probe drives the real watcher over fake sockets that stay silent.
-      - name: a silent resize moves the tube
+      # The watch lifts the geometry's jq program out and does `cap` and
+      # `emit_block` itself, so the two must bake the same block.
+      - name: the fast snapshot matches the geometry
+        run: ./test/probe-snapshot-parity
+
+      # A tile resize posts no Hyprland event, so the watch polls the rects, and
+      # a fatal watch must not exit 0. The probe drives the real watcher over
+      # fake sockets that stay silent.
+      - name: a silent resize moves the tube, and a dead watch says so
         run: ./test/probe-silent-resize
+
+      # Prove the suite can FAIL. A green suite is only evidence if a known
+      # break turns it red: test/run once passed with a shader constant renamed.
+      - name: prove the tests catch a shader mutation
+        run: |
+          cp crt/crt-glass.frag /tmp/crt-glass.orig
+          sed -i 's/^const float TUBE_K1 /const float TUBE_KX /' crt/crt-glass.frag
+          if ./test/run >/dev/null 2>&1; then
+            echo "SENTINEL FAILED: the suite passed with TUBE_K1 renamed to TUBE_KX" >&2
+            cp /tmp/crt-glass.orig crt/crt-glass.frag
+            exit 1
+          fi
+          cp /tmp/crt-glass.orig crt/crt-glass.frag
+          echo "sentinel ok: a renamed shader constant turns the suite red"
 
       # And it must go red with the poll switched off, or it proves nothing.
       - name: prove the resize probe catches a dead poll
