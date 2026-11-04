@@ -5,7 +5,7 @@
 
 The gates collapsed because the two approvals so far were "Keep going! <3" and "keep going, losing the scanlines on the bar is fine": the sealed proofs answered the product and architecture questions before a gate doc existed, so four rounds would buy nothing. One approval of `plan.md` stands in for all four. The rule is in the `software-factory` skill.
 
-- Plan: awaiting approval
+- Plan: APPROVED 2026-11-04 ("Ggogogo")
 - Nothing runs on the live desktop until the plan is approved and slice 5 is reached.
 
 ## Slices
