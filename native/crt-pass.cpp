@@ -22,6 +22,10 @@
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
+#include <hyprland/src/desktop/state/FocusState.hpp>
+#include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
+#include <hyprland/src/desktop/history/WindowHistoryTracker.hpp>
+#include <hyprland/src/desktop/rule/windowRule/WindowRuleApplicator.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/pass/PassElement.hpp>
@@ -58,7 +62,8 @@ struct SKnob {
     int         size     = 1;
     GLint       loc      = -1;
 };
-static std::vector<SKnob> g_knobs;
+static std::vector<SKnob>       g_knobs;
+static std::vector<std::string> g_passthrough;     // window classes that keep their own picture
 static bool               g_animated = false;
 
 static std::string pluginDir() {
@@ -125,9 +130,15 @@ static void readKnobs() {
     seen = t;
     std::ifstream f(path);
     std::string   name;
+    g_passthrough.clear();
     while (f >> name) {
         if (name == "ANIMATED") {
             f >> g_animated;
+            continue;
+        }
+        if (name == "PASS") {
+            f >> name;
+            g_passthrough.push_back(name);
             continue;
         }
         float v[3] = {};
@@ -173,9 +184,19 @@ struct SScratch {
 static std::map<std::pair<int, int>, SScratch> g_scratch;
 static GLuint                                  g_prog = 0, g_vao = 0;
 
+// One surface's tube. Drawing and hit-testing both read this list, in this order,
+// so a pixel and a click can never disagree about which window owns them.
+struct STube {
+    CBox  fb;        // in the framebuffer, for the shader
+    CBox  logical;   // in the layout, for the pointer
+    float curv  = 1;
+    int   pass  = 0;
+    int   quiet = 0;
+};
+
 class CCrtPass : public IPassElement {
   public:
-    explicit CCrtPass(std::vector<std::array<float, 4>> rects) : m_rects(std::move(rects)) {}
+    explicit CCrtPass(std::vector<STube> tubes) : m_tubes(std::move(tubes)) {}
     bool        needsLiveBlur() override { return false; }
     bool        needsPrecomputeBlur() override { return false; }
     const char* passName() override { return "CCrtPass"; }
@@ -237,17 +258,20 @@ class CCrtPass : public IPassElement {
         glUniform1f(glGetUniformLocation(g_prog, "time"), g_animated ? now : 0.F);
         glUniform1i(glGetUniformLocation(g_prog, "wl_output"), 0);
         // TUBE_MON is -1 past the live rects, which tube_at skips as another monitor.
-        std::array<int, MAX_TUBES>   mon, zero{};
-        std::array<float, MAX_TUBES> curv;
+        std::array<int, MAX_TUBES>   mon, pass{}, quiet{};
+        std::array<float, MAX_TUBES> curv{};
+        std::array<float, MAX_TUBES * 4> rect{};
         mon.fill(-1);
-        curv.fill(1.F);
-        std::fill_n(mon.begin(), m_rects.size(), 0);
+        for (size_t i = 0; i < m_tubes.size() && i < MAX_TUBES; i++) {
+            auto const& t = m_tubes[i];
+            mon[i] = 0; curv[i] = t.curv; pass[i] = t.pass; quiet[i] = t.quiet;
+            rect[i * 4] = t.fb.x; rect[i * 4 + 1] = t.fb.y; rect[i * 4 + 2] = t.fb.w; rect[i * 4 + 3] = t.fb.h;
+        }
         glUniform1iv(glGetUniformLocation(g_prog, "TUBE_MON"), MAX_TUBES, mon.data());
         glUniform1fv(glGetUniformLocation(g_prog, "TUBE_CURV"), MAX_TUBES, curv.data());
-        glUniform1iv(glGetUniformLocation(g_prog, "TUBE_PASS"), MAX_TUBES, zero.data());
-        glUniform1iv(glGetUniformLocation(g_prog, "TUBE_QUIET"), MAX_TUBES, zero.data());
-        if (!m_rects.empty())
-            glUniform4fv(glGetUniformLocation(g_prog, "TUBE_RECT"), (int)m_rects.size(), m_rects[0].data());
+        glUniform1iv(glGetUniformLocation(g_prog, "TUBE_PASS"), MAX_TUBES, pass.data());
+        glUniform1iv(glGetUniformLocation(g_prog, "TUBE_QUIET"), MAX_TUBES, quiet.data());
+        glUniform4fv(glGetUniformLocation(g_prog, "TUBE_RECT"), MAX_TUBES, rect.data());
         glDrawArrays(GL_TRIANGLES, 0, 3);
 
         glBindTexture(GL_TEXTURE_2D, tex);
@@ -260,7 +284,7 @@ class CCrtPass : public IPassElement {
     }
 
   private:
-    std::vector<std::array<float, 4>> m_rects;
+    std::vector<STube> m_tubes;
 };
 
 // Test rig: the finished frame, read back after every layer has been drawn.
@@ -293,16 +317,47 @@ class CDump : public IPassElement {
     }
 };
 
-static std::vector<std::array<float, 4>> tubes(PHLMONITOR m) {
-    std::vector<std::array<float, 4>> out;
+// The geometry's own rule, read live: floating windows above tiles, focus order
+// within each group, a float's border inside its frame, and Terminal Delight flat
+// because it curves its own panes.
+static std::vector<STube> tubes(PHLMONITOR m) {
+    struct SRow {
+        PHLWINDOW w;
+        int       group, focus;
+    };
+    const auto&       history = Desktop::History::windowTracker()->fullHistory();
+    std::vector<SRow> rows;
     for (auto const& w : Desktop::windowState()->windows()) {
-        if (!w->m_isMapped || w->isHidden() || w->m_monitor.lock() != m || out.size() >= 24)
+        if (!w->m_isMapped || w->isHidden() || !g_pHyprRenderer->shouldRenderWindow(w, m))
             continue;
+        // A window behind a fullscreen one is still mapped, and still listed. It
+        // must not claim pixels it is not drawing.
+        if (w->alphaValue(Desktop::View::WINDOW_ALPHA_FADE) * w->alphaValue(Desktop::View::WINDOW_ALPHA_FULLSCREEN) == 0.F)
+            continue;
+        int focus = -1;
+        for (size_t i = 0; i < history.size(); i++)
+            if (history[i].lock() == w)
+                focus = history.size() - i - 1;
+        rows.push_back({w, w->m_isFloating ? 0 : 1, focus});
+    }
+    std::ranges::stable_sort(rows, [](auto const& a, auto const& b) { return std::tie(a.group, a.focus) < std::tie(b.group, b.focus); });
+
+    std::vector<STube> out;
+    for (auto const& r : rows) {
+        const auto& w = r.w;
+        if (out.size() >= MAX_TUBES)
+            break;
+        CBox logical = {w->positionAnimation()->value(), w->sizeAnimation()->value()};
+        if (w->m_isFloating && !Fullscreen::controller()->isFullscreen(w) && w->m_ruleApplicator->decorate().valueOrDefault())
+            logical.expand(w->getRealBorderSize());
         // The framebuffer is in the panel's own orientation, not the rotated one a
         // person sees. Only the rect turns: the warp is symmetric in x and y.
-        CBox box = {(w->positionAnimation()->value() - m->m_position) * m->m_scale, w->sizeAnimation()->value() * m->m_scale};
-        box.transform(Math::wlTransformToHyprutils(Math::invertTransform(m->m_transform)), m->m_transformedSize.x, m->m_transformedSize.y);
-        out.push_back(std::array<float, 4>{(float)box.x, (float)box.y, (float)box.w, (float)box.h});
+        CBox fb = {(logical.pos() - m->m_position) * m->m_scale, logical.size() * m->m_scale};
+        fb.transform(Math::wlTransformToHyprutils(Math::invertTransform(m->m_transform)), m->m_transformedSize.x, m->m_transformedSize.y);
+        const auto cls = w->m_class;
+        out.push_back({.fb = fb, .logical = logical, .curv = cls == "terminal-delight" ? 0.F : 1.F,
+                       .pass = std::ranges::find(g_passthrough, cls) != g_passthrough.end(),
+                       .quiet = m != Desktop::focusState()->monitor()});
     }
     return out;
 }
@@ -346,16 +401,15 @@ static std::optional<Vector2D> mapped(const Vector2D& p) {
         for (auto const lvl : {ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, ZWLR_LAYER_SHELL_V1_LAYER_TOP})
             if (Desktop::viewState()->hitTest().layerSurfaceAt(p, &m->m_layerSurfaceLayers[lvl], &coords, &layer))
                 return std::nullopt;
-        for (auto const& w : Desktop::windowState()->windows()) {
-            if (!w->m_isMapped || w->isHidden() || w->m_monitor.lock() != m)
-                continue;
-            const auto pos = w->positionAnimation()->value(), size = w->sizeAnimation()->value();
-            const auto c = (p - pos) / size - Vector2D{0.5, 0.5};
+        for (auto const& t : tubes(m)) {
+            const auto c = (p - t.logical.pos()) / t.logical.size() - Vector2D{0.5, 0.5};
             if (std::abs(c.x) > 0.5 || std::abs(c.y) > 0.5)
                 continue;
+            if (t.curv == 0 || t.pass)
+                return std::nullopt;
             const double r2 = c.x * c.x + c.y * c.y, k = 1.0 + knob("TUBE_K1", 0) * r2 + knob("TUBE_K2", 0) * r2 * r2;
             const double x = std::clamp(0.5 + c.x * k, 0.0, 0.999), y = std::clamp(0.5 + c.y * k, 0.0, 0.999);
-            return pos + Vector2D{x, y} * size;
+            return t.logical.pos() + Vector2D{x, y} * t.logical.size();
         }
     }
     return std::nullopt;
@@ -402,6 +456,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         if (stage == RENDER_POST && (g_animated || access((std::string(getenv("HOME")) + "/keep-drawing").c_str(), F_OK) == 0))
             for (auto& mon : State::monitorState()->monitors())
                 g_pHyprRenderer->damageMonitor(mon);
+        // A lone fullscreen window takes a shortcut that never reaches the stage this
+        // pass runs at, so the shortcut is taken away before it is looked at.
+        if (stage == RENDER_PRE)
+            for (auto& mon : State::monitorState()->monitors())
+                mon->m_solitaryClient.reset();
         auto m = g_pHyprRenderer->m_renderData.pMonitor.lock();
         if (!m) return;
         // Test rig: this file moves the pass to after the layers, which is where

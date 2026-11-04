@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Do the right windows own the right pixels?  prove-windows <state-dir> <out-dir>
+
+Today's shader, driven by the real crt tool, is the definition of right, because
+its ownership comes from the theme's geometry. Each scene is drawn both ways and
+the final frames compared. Clicks are then checked on the same list: a float on
+top of a tile takes its own click, and a passthrough window gets no correction.
+"""
+import importlib.machinery, importlib.util, json, os, re, shutil, subprocess, sys, time
+S, OUT = sys.argv[1], sys.argv[2]
+HOME = S + "/home"; HERE = os.path.dirname(os.path.abspath(__file__)); CRT = os.path.join(HERE, "..", "..", "crt", "crt")
+REAL = os.path.expanduser("~/.local/state/omarchy"); FIFO = HOME + "/vptr.fifo"
+os.makedirs(OUT, exist_ok=True)
+fails = 0
+def verdict(ok, text):
+    global fails
+    fails += 0 if ok else 1
+    print(f"  {'ok  ' if ok else 'FAIL'} {text}", flush=True)
+def inn(*a):
+    return subprocess.run([S + "/in", *a], capture_output=True, text=True, timeout=30)
+def dispatch(lua):
+    r = inn("hyprctl", "dispatch", lua).stdout.strip()
+    if r != "ok": print("  dispatch:", lua, "->", r[:80], flush=True)
+def spawn(args, log=os.devnull):
+    return subprocess.Popen([S + "/in", *args], stdout=open(log, "w"), stderr=subprocess.STDOUT, start_new_session=True)
+def client(name):
+    return spawn(["env", "QT_QPA_PLATFORM=wayland", "QS_NO_RELOAD_POPUP=1", "quickshell", "-p", f"{HOME}/client/{name}.qml"], f"{HOME}/{name}.log")
+def clients():
+    return json.loads(inn("hyprctl", "clients", "-j").stdout)
+def settle(n):
+    for _ in range(80):
+        if len(clients()) >= n: time.sleep(1.2); return
+        time.sleep(.25)
+    sys.exit(f"wanted {n} windows, have {[c['title'] for c in clients()]}")
+def grab(name):
+    time.sleep(1.0)
+    p = f"{HOME}/{name}.ppm"
+    r = inn("grim", "-t", "ppm", p)
+    if r.returncode: sys.exit(f"grim: {r.stderr}")
+    parts = open(p, "rb").read().split(b"\n", 3)
+    w, h = map(int, parts[1].split())
+    shutil.copy(p, f"{OUT}/{name}.ppm")
+    return w, h, parts[3]
+def compare(a, b, w, h):
+    n = big = tot = worst = 0
+    cx, cy = w / 2, h / 2
+    for y in range(0, h, 2):
+        for x in range(0, w, 2):
+            if abs(x - cx) < 90 and abs(y - cy) < 90: continue     # the pointer, by design
+            i = (y*w+x)*3
+            d = max(abs(a[i]-b[i]), abs(a[i+1]-b[i+1]), abs(a[i+2]-b[i+2]))
+            tot += d; n += 1; big += d > 6; worst = max(worst, d)
+    return tot / n, worst, 100 * big / n
+state_home = HOME + "/.state"; st = state_home + "/omarchy"
+os.makedirs(st + "/crt", exist_ok=True); os.makedirs(st + "/current/theme", exist_ok=True)
+k = json.load(open(REAL + "/crt/knobs.json")); k.update(animated=False, on=True, passthrough=["terminal-delight"])
+for f in ("FLICKER", "JIGGLE"): k["service"][f] = 0
+k["panel"]["TRACKING"] = 0
+json.dump(k, open(st + "/crt/knobs.json", "w"))
+shutil.copy(REAL + "/current/theme/colors.toml", st + "/current/theme/colors.toml")
+os.environ.update(XDG_STATE_HOME=state_home, HOME=HOME)
+ld = importlib.machinery.SourceFileLoader("crtmod", CRT); sp = importlib.util.spec_from_loader("crtmod", ld)
+crt = importlib.util.module_from_spec(sp); ld.exec_module(crt)
+def publish(passes=("terminal-delight",)):
+    e = crt.expand(crt.load())
+    lines = [f"{n} {v}" for n, v in e.items()] + ["ANIMATED 0"] + [f"PASS {p}" for p in passes]
+    ch = crt.theme_colours()
+    if ch: lines += ["PHOSPHOR %f %f %f" % tuple(ch[0]), "GLARE_TINT %f %f %f" % tuple(ch[1])]
+    open(HOME + "/knobs.txt", "w").write("\n".join(lines) + "\n")
+    return e
+E = publish()
+def parity(name):
+    w, h, native = grab(f"{name}-native")
+    open(HOME + "/pass-off", "w").close()
+    inn("env", f"XDG_STATE_HOME={state_home}", "CRT_TUBES_ANYWAY=1", "python3", CRT, "tubes")
+    _, _, today = grab(f"{name}-today")
+    inn("hyprctl", "eval", 'hl.config({ decoration = { screen_shader = "" } })')
+    os.unlink(HOME + "/pass-off"); time.sleep(.5)
+    mean, worst, big = compare(native, today, w, h)
+    verdict(mean < 1.0 and big < 0.5, f"{name}: mean {mean:.3f}/255, worst {worst}, {big:.3f}% off by more than 6")
+
+open(HOME + "/keep-drawing", "w").close()
+for name in ("tile", "tile2", "toast", "target", "float"):
+    subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/{name}.qml"])
+try: os.unlink(FIFO)
+except OSError: pass
+subprocess.run(["pkill", "-f", f"[v]ptr {FIFO}"]); time.sleep(1)
+spawn([HOME + "/vptr", FIFO, "1600", "900"]); client("target"); settle(1)
+client("tile2"); settle(2)
+parity("two-tiles")
+def fullscreen(on):
+    if on:
+        dispatch("hl.dsp.focus({ window = 'title:^grid two$' })"); time.sleep(.3)
+    dispatch(f"hl.dsp.window.fullscreen({{ mode = 'fullscreen', action = '{'set' if on else 'unset'}' }})"); time.sleep(1)
+fullscreen(True)
+parity("fullscreen")
+w, h, fs_clean = grab("fullscreen-clean")
+fullscreen(False)
+client("float"); settle(3)
+parity("float-focused")
+dispatch("hl.dsp.focus({ window = 'title:^grid$' })"); time.sleep(.5)
+parity("float-behind-focus")
+spawn(["foot", "--app-id=terminal-delight", "--title=td", "sleep", "300"]); settle(4)
+parity("terminal-delight-tile")
+# Today's picture is wrong here: a float behind the fullscreen window punches a bent
+# hole in it. So the reference is the same fullscreen window with nothing behind it.
+fullscreen(True)
+_, _, fs_full = grab("fullscreen-float-behind")
+mean, worst, big = compare(fs_clean, fs_full, w, h)
+verdict(mean < 0.1 and big < 0.1, f"a float hidden behind fullscreen changes nothing: mean {mean:.3f}/255, {big:.3f}% off")
+fullscreen(False)
+
+def send(line):
+    with open(FIFO, "w") as f: f.write(line + "\n")
+def clicks(name):
+    return re.findall(r"CLICK (\w+) (-?[\d.]+) (-?[\d.]+)", open(f"{HOME}/{name}.log", errors="replace").read())
+def click_at(x, y, who):
+    n = len(clicks(who))
+    send(f"move {round(x)} {round(y)}"); time.sleep(.2); send("click")
+    for _ in range(40):
+        got = clicks(who)
+        if len(got) > n: return got[-1]
+        time.sleep(.05)
+    return None
+K1, K2 = E["TUBE_K1"], E["TUBE_K2"]
+def warp(l):
+    c = (l[0]-.5, l[1]-.5); r2 = c[0]**2 + c[1]**2; k = 1 + K1*r2 + K2*r2*r2
+    return (.5 + c[0]*k, .5 + c[1]*k)
+fl = next(c for c in clients() if c["title"] == "float")
+dispatch("hl.dsp.focus({ window = 'title:^float$' })"); time.sleep(.5)
+(fx, fy), (fw, fh) = fl["at"], fl["size"]
+bw = 2                                    # the frame is the window plus its border
+px, py = fx + fw * .9, fy + fh * .85
+mx, my = warp(((px - fx + bw) / (fw + 2*bw), (py - fy + bw) / (fh + 2*bw)))
+want = (mx * (fw + 2*bw) - bw, my * (fh + 2*bw) - bw)
+got = click_at(px, py, "float")
+err = None if got is None else ((float(got[1]) - want[0])**2 + (float(got[2]) - want[1])**2) ** .5
+verdict(got is not None and err <= 3, f"a float over a tile takes its own click, mapped through its own frame: {err}")
+
+cls = next(c["class"] for c in clients() if c["title"].startswith("grid"))
+publish((cls, "terminal-delight")); time.sleep(1.5)
+tile = next(c for c in clients() if c["title"] == "grid")
+px, py = tile["at"][0] + 60, tile["at"][1] + 60
+got = click_at(px, py, "target")
+verdict(got is not None and abs(float(got[1]) - 60) <= 2 and abs(float(got[2]) - 60) <= 2, f"a passthrough window gets its click with no correction: {got}")
+publish()
+for name in ("tile2", "target", "float"):
+    subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/{name}.qml"])
+subprocess.run(["pkill", "-f", f"[v]ptr {FIFO}"]); subprocess.run(["pkill", "-f", "[f]oot --app-id=terminal-delight --title=td"])
+print("FAILED" if fails else "PROVED", flush=True)
+sys.exit(1 if fails else 0)
