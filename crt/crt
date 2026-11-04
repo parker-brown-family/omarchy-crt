@@ -896,7 +896,7 @@ def tubes_watch():
     #
     # COALESCE_MAX is also the speed limit, and the limit is the compositor's: a
     # layout the driver has not seen compiles for 60-95 ms with the whole desktop
-    # frozen (measured 2026-11-03, 21 KB shader, 7 tubes; a layout it has seen is
+    # frozen (measured 2026-11-03, 21 KB shader, 5-9 tubes; a layout it has seen is
     # ~10 ms from its disk cache). A held resize at the poll's own rate would
     # leave the desktop stalled most of the time it was moving.
     DEBOUNCE = 0.045
