@@ -9,6 +9,15 @@ wayland-scanner client-header "$X" "$S/home/vp.h"
 wayland-scanner private-code "$X" "$S/home/vp.c"
 # shellcheck disable=SC2046  # pkg-config prints several flags
 gcc -O1 -I"$S/home" "$here/rig/vptr.c" "$S/home/vp.c" -o "$S/home/vptr" $(pkg-config --cflags --libs wayland-client)
+P=/usr/share/wayland-protocols
+for x in "$P/stable/xdg-shell/xdg-shell.xml" "$P/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml" "$P/unstable/relative-pointer/relative-pointer-unstable-v1.xml"; do
+  n="$(basename "$x" .xml)"
+  wayland-scanner client-header "$x" "$S/home/$n.h"
+  wayland-scanner private-code "$x" "$S/home/$n.c"
+done
+# shellcheck disable=SC2046  # pkg-config prints several flags
+gcc -O1 -I"$S/home" "$here/rig/locker.c" "$S"/home/xdg-shell.c "$S"/home/pointer-constraints-unstable-v1.c "$S"/home/relative-pointer-unstable-v1.c \
+  -o "$S/home/locker" $(pkg-config --cflags --libs wayland-client)
 "$here/rig/up" "$S"
 cp "$here/../crt/crt-glass.frag" "$S/home/crt-glass.frag"
 [[ -f "$S/home/knobs.txt" ]] || : >"$S/home/knobs.txt"

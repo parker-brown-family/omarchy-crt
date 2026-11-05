@@ -10,6 +10,10 @@ hl.config({
 hl.config({ debug = { damage_tracking = 1, disable_logs = false } })
 -- The scene's floating window, by title.
 -- crt.lua, when a test has put one there, exactly as a real config requires it.
+-- What one seat needs set at startup. Some options cannot be changed later: switching
+-- force_zero_scaling at runtime clamps an X window's clicks to its old size.
+pcall(dofile, os.getenv("HOME") .. "/seat.lua")
 pcall(dofile, os.getenv("HOME") .. "/.config/hypr/crt.lua")
 hl.window_rule({ name = "crt-float", match = { title = "float" }, float = true, size = { 700, 420 }, move = { 300, 200 } })
 hl.window_rule({ name = "crt-dragsrc", match = { title = "dragsrc" }, float = true, size = { 300, 160 }, move = { 60, 80 } })
+hl.window_rule({ name = "crt-locker", match = { title = "locker" }, float = true, size = { 500, 300 }, move = { 200, 150 } })

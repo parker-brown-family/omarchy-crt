@@ -6,6 +6,7 @@ pkill -f "[H]yprland --config $S" 2>/dev/null || pkill -f "[H]yprland --config .
 sleep 1
 rm -rf "$S/run/hypr" "$S"/run/wayland-*; mkdir -p "$S/run/hypr" "$S/home"
 cp "$here/rig/hypr.lua" "$S/home/hypr.lua"
+printf '%s\n' "${CRT_SEAT_LUA:-}" >"$S/home/seat.lua"
 # CRT_SEAT is lines of "NAME MODE SCALE TRANSFORM X Y"; the default is one plain monitor.
 echo "${CRT_SEAT:-HEADLESS-1 1600x900@60 1 0 0 0}" | while read -r name mode scale tf x y; do
   echo "hl.monitor({ output = \"$name\", mode = \"$mode\", position = \"${x}x${y}\", scale = $scale, transform = $tf })" >>"$S/home/hypr.lua"
