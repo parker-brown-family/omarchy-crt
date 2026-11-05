@@ -74,7 +74,7 @@ def pointer(w, h):
     wait(lambda: os.path.exists(FIFO))
 def layout():
     ms = json.loads(inn("hyprctl", "monitors", "-j").stdout)
-    return max(m["x"] + m["width"] for m in ms), max(m["y"] + m["height"] for m in ms)
+    return round(max(m["x"] + m["width"] / m["scale"] for m in ms)), round(max(m["y"] + m["height"] / m["scale"] for m in ms))
 def alive():
     return inn("hyprctl", "version").returncode == 0
 def report(label, m):
