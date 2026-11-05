@@ -43,6 +43,7 @@
 #include <hyprland/src/desktop/state/ViewHitTester.hpp>
 #include <hyprland/src/desktop/view/LayerSurface.hpp>
 #include <hyprland/protocols/wlr-layer-shell-unstable-v1.hpp>
+#include <hyprland/src/protocols/core/DataDevice.hpp>
 
 static HANDLE PHANDLE = nullptr;
 
@@ -348,8 +349,9 @@ static std::vector<STube> tubes(PHLMONITOR m) {
 // THE POINTER. The picture now bends and the pointer does not, so a pixel on
 // screen shows the source the shader gathers for it, and a click must land there.
 // The move routine is the one place hit-testing happens, so only while it runs
-// does "where is the pointer" answer with the mapped position. The drawn cursor,
-// drags and keybinds keep the true one. Flat layers are hit where they are drawn.
+// does "where is the pointer" answer with the mapped position. The drawn cursor and
+// keybinds keep the true one. Flat layers are hit where they are drawn. Drag and drop
+// motion comes out of the move routine too, so a drop target gets the mapped position.
 // (overridePos looks like the tool for this and is not: it skips sending motion.)
 static CFunctionHook*          g_positionHook = nullptr;
 static CFunctionHook*          g_moveHook     = nullptr;
@@ -373,17 +375,23 @@ static SP<CWLSurfaceResource> hkLayerAt(void* self, const Vector2D& pos, std::ve
     return ((origLayerAt)g_layerHook->m_original)(self, pos, layers, coords, found, lock);
 }
 
+// Past a tube's edge the correction stops growing and carries on at its edge value. It
+// is quartic in the distance from the centre, and a press held far from a small window
+// would otherwise throw the position a whole screen away.
 static Vector2D through(const CBox& box, const Vector2D& p, bool clamp) {
-    const auto   c  = (p - box.pos()) / box.size() - Vector2D{0.5, 0.5};
+    const Vector2D in = {std::clamp(p.x, box.x, box.x + box.w), std::clamp(p.y, box.y, box.y + box.h)};
+    const auto   c  = (in - box.pos()) / box.size() - Vector2D{0.5, 0.5};
     const double r2 = c.x * c.x + c.y * c.y, k = 1.0 + knob("TUBE_K1", 0) * r2 + knob("TUBE_K2", 0) * r2 * r2;
     Vector2D     w  = Vector2D{0.5, 0.5} + c * k;
     if (clamp)
         w = {std::clamp(w.x, 0.0, 0.999), std::clamp(w.y, 0.0, 0.999)};
-    return box.pos() + w * box.size();
+    return p + box.pos() + w * box.size() - in;
 }
 
 // A press belongs to whatever it landed on until the button comes up. Without this a
-// drag from a tile jumps by the whole correction as it crosses a flat toast.
+// drag from a tile jumps by the whole correction as it crosses a flat toast. Drag and
+// drop is the exception: the button is held, but the pointer now speaks to whatever is
+// under it, so each drop target is mapped through its own tube.
 static std::optional<CBox> g_pressTube;
 
 static std::optional<Vector2D> mapped(const Vector2D& p) {
@@ -395,7 +403,7 @@ static std::optional<Vector2D> mapped(const Vector2D& p) {
         g_pressTube.reset();
         return std::nullopt;
     }
-    if (!g_pInputManager->m_currentlyHeldButtons.empty())
+    if (!g_pInputManager->m_currentlyHeldButtons.empty() && !PROTO::data->dndActive())
         return g_pressTube ? std::optional{through(*g_pressTube, p, false)} : std::nullopt;
     g_pressTube.reset();
     for (auto const& m : State::monitorState()->monitors()) {

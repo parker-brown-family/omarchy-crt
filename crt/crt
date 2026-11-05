@@ -1330,6 +1330,28 @@ def native_flag():
 
 def native_active():
     """Does the native pass own the glass in THIS Hyprland session?"""
+    return native_flagged() or native_adopted()
+
+
+def native_adopted():
+    """A pass Hyprland holds is drawing, flag or no flag. The flag is a note for crt.lua,
+    which cannot ask. A crt that trusted a lost one wrote to a shader nobody was looking
+    at, and left the curve up under a tray that said OFF (2026-11-04)."""
+    sig, flag = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"), native_flag()
+    if not (sig and flag) or os.environ.get("CRT_TUBES_ANYWAY"):
+        return False
+    plugins = hypr_query("plugin list")
+    if not isinstance(plugins, list) or not any(p.get("name") == "crt-pass" for p in plugins):
+        return False
+    built = sorted(NATIVE_DIR.glob("crt-pass-*.so"))
+    try:
+        flag.write_text(f"{sig}\n{built[-1] if built else ''}\n")
+    except OSError:
+        pass        # the pass is held either way, and that is the question being asked
+    return True
+
+
+def native_flagged():
     sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
     flag = native_flag()
     try:

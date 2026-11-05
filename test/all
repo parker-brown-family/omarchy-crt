@@ -1,16 +1,30 @@
 #!/usr/bin/env bash
 # Every suite that needs no GPU, judged by exit code. This is what CI runs and what to
 # run before a push. The GPU proofs are native/rig/matrix.
+#
+# Each suite runs over a decoy of a live session: a flag and a socket, in a runtime
+# directory of their own. A suite that lets a call escape its sandbox touches the decoy
+# here, and not the real pass on the desk it runs on.
 cd "$(dirname "$0")/.." || exit 1
 bad=0
+decoy="$(mktemp -d)"
+log="$decoy/log"
+mkdir -p "$decoy/hypr/decoy"
+: >"$decoy/hypr/decoy/.socket.sock"
+printf 'decoy\n/nowhere/crt-pass-decoy.so\n' >"$decoy/omarchy-crt-native"
 for t in test/run test/probe-snapshot-parity test/probe-silent-resize test/probe-fullscreen-layer; do
-  if ./"$t" >/tmp/crt-test-all.$$ 2>&1; then
+  if env -u HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR="$decoy" ./"$t" >"$log" 2>&1; then
     echo "ok    $t"
   else
     echo "FAIL  $t"
-    grep -E 'FAIL|Traceback' /tmp/crt-test-all.$$ | head -20
+    grep -E 'FAIL|Traceback' "$log" | head -20
     bad=$((bad + 1))
   fi
+  if ! grep -qx decoy "$decoy/omarchy-crt-native" 2>/dev/null; then
+    echo "FAIL  $t reached outside its sandbox and touched the live flag"
+    bad=$((bad + 1))
+    printf 'decoy\n/nowhere/crt-pass-decoy.so\n' >"$decoy/omarchy-crt-native"
+  fi
 done
-rm -f /tmp/crt-test-all.$$
+rm -rf "$decoy"
 exit "$bad"

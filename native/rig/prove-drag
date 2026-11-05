@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Does a drag land on what the screen shows?  prove-drag <state-dir> <out-dir>
+
+A real Wayland drag, from a small floating window into a curved tile. A drop target
+is a place in the tile's own coordinates, shown somewhere else by the warp. This puts
+the pointer where each target appears, drops, and reads back where the tile says the
+drop landed. It must land there whichever window the press began in.
+"""
+import json, os, re, subprocess, sys, time
+S, OUT = sys.argv[1], sys.argv[2]
+HOME = S + "/home"; FIFO = HOME + "/vptr.fifo"
+knobs = dict(l.split()[:2] for l in open(HOME + "/knobs.txt") if l.strip())
+K1, K2 = float(knobs.get("TUBE_K1", 0.137)), float(knobs.get("TUBE_K2", 0.058))
+print(f"  warp strength: {K1}, {K2}", flush=True)
+os.makedirs(OUT, exist_ok=True)
+fails = 0
+def verdict(ok, text):
+    global fails
+    fails += 0 if ok else 1
+    print(f"  {'ok  ' if ok else 'FAIL'} {text}", flush=True)
+def spawn(args, log):
+    return subprocess.Popen([S + "/in", *args], stdout=open(log, "w"), stderr=subprocess.STDOUT, start_new_session=True)
+def client(name):
+    return spawn(["env", "QT_QPA_PLATFORM=wayland", "QS_NO_RELOAD_POPUP=1", "QT_FORCE_STDERR_LOGGING=1", "quickshell", "-p", f"{HOME}/client/{name}.qml"], f"{HOME}/{name}.log")
+def send(line):
+    with open(FIFO, "w") as f: f.write(line + "\n")
+def clients():
+    return json.loads(subprocess.run([S + "/in", "hyprctl", "clients", "-j"], capture_output=True, text=True).stdout)
+def warp(l):
+    c = (l[0] - .5, l[1] - .5); r2 = c[0]**2 + c[1]**2; k = 1 + K1*r2 + K2*r2*r2
+    return (.5 + c[0]*k, .5 + c[1]*k)
+def unwarp(src):
+    p = list(src)
+    for _ in range(60):
+        w = warp(p); p[0] += src[0] - w[0]; p[1] += src[1] - w[1]
+    return p
+def drops():
+    return re.findall(r"DROP tgt (-?[\d.]+) (-?[\d.]+)", open(f"{HOME}/droptgt.log", errors="replace").read())
+def glide(a, b, steps=12):
+    for i in range(1, steps + 1):
+        send(f"move {round(a[0] + (b[0]-a[0])*i/steps)} {round(a[1] + (b[1]-a[1])*i/steps)}"); time.sleep(.04)
+def drag(start, end):
+    n = len(drops())
+    send(f"move {round(start[0])} {round(start[1])}"); time.sleep(.25)
+    send("press"); time.sleep(.2)
+    glide(start, (start[0] + 40, start[1] + 30), 6); time.sleep(.3)
+    glide((start[0] + 40, start[1] + 30), end); time.sleep(.3)
+    send(f"move {round(end[0])} {round(end[1])}"); time.sleep(.2)
+    send("release")
+    for _ in range(30):
+        got = drops()
+        if len(got) > n: return float(got[-1][0]), float(got[-1][1])
+        time.sleep(.05)
+    return None
+
+open(HOME + "/keep-drawing", "w").close()
+try: os.unlink(HOME + "/input-flat")
+except OSError: pass
+subprocess.run(["pkill", "-f", f"[v]ptr {FIFO}"]); time.sleep(.2)
+try: os.unlink(FIFO)
+except OSError: pass
+spawn([HOME + "/vptr", FIFO, "1600", "900"], HOME + "/vptr.log")
+client("droptgt")
+for _ in range(60):
+    if clients() and os.path.exists(FIFO): break
+    time.sleep(.25)
+time.sleep(1)
+client("dragsrc")
+for _ in range(60):
+    if len(clients()) >= 2: break
+    time.sleep(.25)
+time.sleep(1.5)
+src = next(c for c in clients() if c["title"] == "dragsrc")
+tgt = next(c for c in clients() if c["title"] == "grid")
+print(f"  from a {src['size'][0]}x{src['size'][1]} float at {src['at']} into a {tgt['size'][0]}x{tgt['size'][1]} tile at {tgt['at']}", flush=True)
+verdict(src["floating"] and src["size"][0] <= 320, "the source is a small float")
+BW = 2
+X, Y = tgt["at"][0] - BW, tgt["at"][1] - BW; W, H = tgt["size"][0] + 2*BW, tgt["size"][1] + 2*BW
+ww, wh = W - 2*BW, H - 2*BW
+start = (src["at"][0] + src["size"][0]/2, src["at"][1] + src["size"][1]/2)
+TARGETS = {"centre": (.5*ww, .5*wh), "right": (.9*ww, .5*wh), "bottom right": (.88*ww, .86*wh), "bottom": (.5*ww, .9*wh)}
+worst = 0
+for name, (tx, ty) in TARGETS.items():
+    lx, ly = unwarp(((tx + BW) / W, (ty + BW) / H))
+    got = drag(start, (X + lx*W, Y + ly*H))
+    miss = None if got is None else ((got[0] - tx)**2 + (got[1] - ty)**2) ** .5
+    print(f"  {name}: wanted {tx:.0f},{ty:.0f} got {got} miss {'no drop' if miss is None else f'{miss:.1f} px'}", flush=True)
+    worst = float("inf") if miss is None else max(worst, miss)
+verdict(worst <= 3, f"every drop lands on the target you see, worst {worst:.1f} px")
+subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/dragsrc.qml"]); time.sleep(.5)
+client("press")
+for _ in range(60):
+    if len(clients()) >= 2: break
+    time.sleep(.25)
+time.sleep(1.5)
+# A plain held press, no drag and drop, carried far past a small window's edge. The
+# window keeps the press, so its correction must stop growing at the edge.
+src = next(c for c in clients() if c["title"] == "dragsrc")
+start = (src["at"][0] + src["size"][0]/2, src["at"][1] + src["size"][1]/2)
+far = (1400, 700)
+send(f"move {round(start[0])} {round(start[1])}"); time.sleep(.25)
+send("press"); time.sleep(.2); glide(start, far); time.sleep(.4); send("release"); time.sleep(.3)
+held = re.findall(r"HELD press (-?[\d.]+) (-?[\d.]+)", open(f"{HOME}/press.log", errors="replace").read())
+off = None if not held else ((float(held[-1][0]) - (far[0] - src["at"][0]))**2 + (float(held[-1][1]) - (far[1] - src["at"][1]))**2) ** .5
+print(f"  held far from a small window: {off if off is None else f'{off:.0f} px'} from the true pointer", flush=True)
+verdict(off is not None and off < 100, "a held press stays near the pointer past the window's edge")
+subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/press.qml"])
+subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/droptgt.qml"])
+print("FAILED" if fails else "PROVED", flush=True)
+sys.exit(1 if fails else 0)

@@ -54,6 +54,11 @@ mkdir -p "$HOME/.config/hypr" "$XDG_STATE_HOME/omarchy/current/theme"
 mkdir -p "$SANDBOX/bin"
 export HYPRCTL_LOG="$SANDBOX/hyprctl.log"
 export PLUGIN_LOADED="$SANDBOX/plugin.loaded" PLUGIN_STUCK="$SANDBOX/plugin.stuck"
+# Every call gets the sandbox's runtime directory, not only the ones that ask. A `crt
+# uninstall` here once reached the real one and deleted the flag of a pass still drawing.
+export XDG_RUNTIME_DIR="$SANDBOX/run"
+mkdir -p "$XDG_RUNTIME_DIR"
+unset HYPRLAND_INSTANCE_SIGNATURE
 export SHADER_STATE="$SANDBOX/screen_shader"
 export TD_TUBES_STATE="$SANDBOX/td-tubes-active"
 export DAMAGE_STATE="$SANDBOX/damage_tracking"
@@ -75,7 +80,11 @@ case "$1" in
         else touch "$PLUGIN_LOADED"; echo ok; fi ;;
       unload) [[ -f "$PLUGIN_STUCK" ]] || rm -f "$PLUGIN_LOADED"; echo ok ;;
       list)
-        if [[ -f "$PLUGIN_LOADED" ]]; then echo "Plugin crt-pass by Parker Brown:"
+        if [[ "${3-}" == -j ]]; then
+          if [[ -f "$PLUGIN_LOADED" && "${HYPRLAND_INSTANCE_SIGNATURE-}" != a-new-login ]]; then
+            echo '[{"name": "crt-pass"}]'
+          else echo '[]'; fi
+        elif [[ -f "$PLUGIN_LOADED" ]]; then echo "Plugin crt-pass by Parker Brown:"
         else echo "no plugins loaded"; fi ;;
     esac ;;
   getoption)
@@ -1095,6 +1104,21 @@ check "and leaves no flag" "$([[ -e $FLAG ]] && echo y || echo n)" "n"
 check "and the shader stays" "$(grep -c 'crt-glass' "$SHADER_STATE")" "1"
 rm -f "$PLUGIN_REFUSE"
 
+# A lost flag. Hyprland still holds the pass, so it is still drawing, and crt must
+# still reach it: this is the tray reading OFF over a curve that stayed.
+nat native on >/dev/null 2>&1
+rm -f "$FLAG"
+check "a pass that lost its flag still reads as on" "$(nat native status)" "native pass: on"
+check "and gets its flag back" "$(head -1 "$FLAG")" "this-session"
+rm -f "$FLAG"
+nat off >/dev/null 2>&1
+check "and crt off still reaches it" "$(awk '$1=="ON"{print $2}' "$NATDIR/knobs.txt")" "0"
+rm -f "$FLAG"
+nat on >/dev/null 2>&1
+check "and so does crt on" "$(awk '$1=="ON"{print $2}' "$NATDIR/knobs.txt")" "1"
+nat native off >/dev/null 2>&1
+check "and native off takes it down" "$(nat native status)" "native pass: off"
+
 # Removal, with the pass on. It draws from inside Hyprland, so nothing else stops it.
 LIVE="$RUNDIR/hypr/this-session"; mkdir -p "$LIVE"; : >"$LIVE/.socket.sock"
 unloads() { grep -c '^plugin unload' "$HYPRCTL_LOG"; }
@@ -1138,6 +1162,7 @@ GCRT="$GONE/crt/crt"
 guard() { env -u HYPRLAND_INSTANCE_SIGNATURE XDG_RUNTIME_DIR="$RUNDIR" "$GUARDF" run toggle; }
 arm() {
   rm -rf "$GONE"; mkdir -p "$GONE"; cp -r "$REPO/crt" "$REPO/manifest.json" "$GONE/"
+  rm -f "$PLUGIN_LOADED"
   XDG_RUNTIME_DIR="$RUNDIR" HYPRLAND_INSTANCE_SIGNATURE=this-session "$GCRT" install >/dev/null 2>&1
   echo built >"$NATDIR/crt-pass.so"
   XDG_RUNTIME_DIR="$RUNDIR" HYPRLAND_INSTANCE_SIGNATURE=this-session "$GCRT" native on >/dev/null 2>&1

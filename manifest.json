@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "brownfamilysports.crt",
   "name": "Terminal CRT",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "Parker Brown",
   "license": "MIT",
   "description": "Curved glass, scanlines and a phosphor glow over the whole desktop — on any Omarchy theme",
