@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""The layouts the other proofs never reach.  prove-cases <state-dir> <out-dir>
+"""The layouts the other proofs never reach.  prove-cases <state-dir> <out-dir> [x11]
 
 Special workspaces, groups, pinned windows, a monitor plugged in and pulled, an
 XWayland window, and a client that locks the pointer. For each, a real click at
 the place a target appears must land on that target, and Hyprland must still be up.
+With x11, only the XWayland window, for a seat at another scale or rotation.
 """
 import json, os, re, subprocess, sys, time
 S, OUT = sys.argv[1], sys.argv[2]
@@ -49,8 +50,9 @@ def unwarp(src):
     return p
 def clicks(name, who):
     return re.findall(rf"CLICK {who} (-?[\d.]+) (-?[\d.]+)", open(f"{HOME}/{name}.log", errors="replace").read())
-def miss(c, name, who, frac=(.07, .105)):
-    """Click where a target near a corner of window c appears; how far off did it land?"""
+def miss(c, name, who, frac=(.07, .105), units=1):
+    """Click where a target near a corner of window c appears; how far off did it land?
+    units is how many of the client's own pixels make one logical pixel."""
     ww, wh = c["size"]; W, H = ww + 2*BW, wh + 2*BW
     X, Y = c["at"][0] - BW, c["at"][1] - BW
     tx, ty = frac[0]*ww, frac[1]*wh
@@ -62,7 +64,7 @@ def miss(c, name, who, frac=(.07, .105)):
     send(f"move {round(X + lx*W)} {round(Y + ly*H)}"); time.sleep(.2); send("click")
     for _ in range(40):
         got = clicks(name, who)
-        if len(got) > n: return ((float(got[-1][0]) - tx)**2 + (float(got[-1][1]) - ty)**2) ** .5
+        if len(got) > n: return ((float(got[-1][0]) / units - tx)**2 + (float(got[-1][1]) / units - ty)**2) ** .5
         time.sleep(.05)
     return None
 def pointer(w, h):
@@ -72,16 +74,41 @@ def pointer(w, h):
     except OSError: pass
     spawn([HOME + "/vptr", FIFO, str(w), str(h)], HOME + "/vptr.log")
     wait(lambda: os.path.exists(FIFO))
+def logical(m):
+    w, h = m["width"] / m["scale"], m["height"] / m["scale"]
+    return (h, w) if m["transform"] % 2 else (w, h)
 def layout():
     ms = json.loads(inn("hyprctl", "monitors", "-j").stdout)
-    return round(max(m["x"] + m["width"] / m["scale"] for m in ms)), round(max(m["y"] + m["height"] / m["scale"] for m in ms))
+    return round(max(m["x"] + logical(m)[0] for m in ms)), round(max(m["y"] + logical(m)[1] for m in ms))
 def alive():
     return inn("hyprctl", "version").returncode == 0
 def report(label, m):
     verdict(m is not None and m <= 3, f"{label}: {'no click' if m is None else f'{m:.1f} px'}")
 
+def x11():
+    """An XWayland window. With force_zero_scaling it works in physical pixels, so its
+    click coordinates are the monitor's scale times the logical ones."""
+    zero = "true" in inn("hyprctl", "getoption", "xwayland:force_zero_scaling").stdout.split("\n")[0]
+    # Through Hyprland, so the client gets the seat's own DISPLAY and its own /tmp.
+    dispatch(f'hl.dsp.exec_cmd("sh -c \'QT_QPA_PLATFORM=xcb QT_FORCE_STDERR_LOGGING=1 quickshell -p {HOME}/client/x11.qml >{HOME}/x11.log 2>&1\'")')
+    ok = wait(lambda: by("x11grid"), 12)
+    verdict(ok, f"an XWayland window opens, force_zero_scaling {zero}")
+    if ok:
+        time.sleep(1.2); c = by("x11grid")
+        mon = next(m for m in json.loads(inn("hyprctl", "monitors", "-j").stdout) if m["id"] == c["monitor"])
+        verdict(c["xwayland"], f"and really is X11, {c['size'][0]}x{c['size'][1]} on a scale {mon['scale']} monitor, transform {mon['transform']}")
+        units = mon["scale"] if zero else 1
+        for name, frac in (("near a corner", (.07, .105)), ("far corner", (.9, .88)), ("centre", (.5, .5))):
+            report(f"an XWayland click, {name}", miss(c, "x11", "x11", frac, units))
+    subprocess.run(["pkill", "-f", "[q]uickshell -p .*x11.qml$"]); time.sleep(1)
+    wait(lambda: not by("x11grid"), 4)
+
 open(HOME + "/keep-drawing", "w").close()
-pointer(1600, 900)
+pointer(*layout())
+if len(sys.argv) > 3 and sys.argv[3] == "x11":
+    x11()
+    print("FAILED" if fails else "PROVED", flush=True)
+    sys.exit(1 if fails else 0)
 
 client("target"); wait(lambda: by("grid")); time.sleep(1.2)
 report("a tile takes a click, as a baseline", miss(by("grid"), "target", "tile"))
@@ -134,16 +161,7 @@ pointer(*layout())
 report("a click after the pull", miss(by("grid"), "target", "tile"))
 stop("target")
 
-# Through Hyprland, so the client gets the seat's own DISPLAY and its own /tmp.
-dispatch(f'hl.dsp.exec_cmd("sh -c \'QT_QPA_PLATFORM=xcb QT_FORCE_STDERR_LOGGING=1 quickshell -p {HOME}/client/x11.qml >{HOME}/x11.log 2>&1\'")')
-ok = wait(lambda: by("x11grid"), 12)
-verdict(ok, "an XWayland window opens in the seat")
-if ok:
-    time.sleep(1.2); c = by("x11grid")
-    verdict(c["xwayland"], "and really is X11")
-    report("an XWayland window", miss(c, "x11", "x11"))
-    dispatch('hl.dsp.window.close({ window = "title:x11grid" })')
-    subprocess.run(["pkill", "-f", "[q]uickshell -p .*x11.qml"]); time.sleep(.5)
+x11()
 
 spawn([HOME + "/locker"], HOME + "/locker.log")
 wait(lambda: by("locker")); time.sleep(1)
