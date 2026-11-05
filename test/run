@@ -1267,6 +1267,24 @@ if command -v g++ >/dev/null && command -v glslangValidator >/dev/null; then
   check "with every knob a uniform" \
     "$(grep -cE '^const float (TUBE_K1|SCAN|GLOW|TRACKING) ' "$SANDBOX/native.frag")" "0"
   check "and the tube arrays uniform too" "$(grep -c '^uniform vec4  TUBE_RECT' "$SANDBOX/native.frag")" "1"
+  ts() { "$SANDBOX/test-source" "$@"; }
+  check "a tube's centre stays where it is" "$(ts --through 100 100 300 160 250 180 0.137 0.058 1)" "250 180"
+  check "the pointer lands where the shader gathers" \
+    "$(ts --through 0 0 1000 1000 900 500 0.137 0.058 1)" \
+    "$(python3 -c "
+c = 0.4; r2 = c * c; k = 1 + 0.137 * r2 + 0.058 * r2 * r2
+print(f'{(0.5 + c * k) * 1000:g} 500')")"
+  check "at the edge a hover stays inside the tube" "$(ts --through 0 0 1000 1000 999 500 5 5 1)" "999 500"
+  check "past the edge the correction holds its edge value" \
+    "$(python3 -c "
+import subprocess, sys
+ts = sys.argv[1]
+run = lambda x, y: [float(v) for v in subprocess.check_output([ts, '--through', '60', '80', '300', '160', x, y, '0.137', '0.058', '0']).split()]
+edge, far = run('360', '240'), run('1400', '700')
+print(round(edge[0] - 360, 3) == round(far[0] - 1400, 3), round(edge[1] - 240, 3) == round(far[1] - 700, 3), abs(far[0] - 1400) < 100)" "$SANDBOX/test-source")" "True True True"
+  check "a held press keeps its tube" "$(ts --press 1 0)" "1"
+  check "drag and drop gives it up, so each drop target uses its own" "$(ts --press 1 1)" "0"
+  check "a free pointer has no press to keep" "$(ts --press 0 0)" "0"
   printf 'TUBE_K1 1e39\nON 0\nANIMATED 1\nPASS foot\n' >"$SANDBOX/knobs.bad"
   check "a value too large for a float cannot hide the lines after it" \
     "$("$SANDBOX/test-source" "$TEMPLATE" "$SANDBOX/knobs.bad" | cut -d' ' -f1-3)" "on=0 animated=1 pass=1"

@@ -75,7 +75,40 @@ jobs:
           cp /tmp/crt.orig crt/crt
           echo "sentinel ok: a broken native owner turns the suite red"
 
+      # The pointer logic is what broke drag and drop, so it must go red here.
+      - name: prove the tests catch a broken press lock
+        run: |
+          cp native/source.hpp /tmp/source.orig
+          sed -i 's/^    return held \&\& !dragAndDrop;$/    return held;/' native/source.hpp
+          cmp -s native/source.hpp /tmp/source.orig && { echo "mutation did not apply" >&2; exit 1; }
+          if ./test/run >/dev/null 2>&1; then
+            echo "SENTINEL FAILED: the suite passed with drag and drop under the press lock" >&2
+            cp /tmp/source.orig native/source.hpp
+            exit 1
+          fi
+          cp /tmp/source.orig native/source.hpp
+          echo "sentinel ok: a broken press lock turns the suite red"
+
       # bin/sync-tubes-geometry is Python, not shell, and shellcheck refuses
       # it outright (SC1071) rather than skipping it.
       - name: shellcheck the scripts
         run: shellcheck -S warning bin/shoot test/run test/all native/sandbox native/build native/rig/up native/rig/scene native/rig/matrix
+
+  # The plugin compiles against one Hyprland, and the runner has no GPU to run it on.
+  # This catches an API break; the render pass itself is native/rig/matrix, by hand.
+  # The repository snapshot is pinned for the same reason the actions are: the version
+  # being built against should change when somebody decides, not on the day CI runs.
+  native:
+    runs-on: ubuntu-latest
+    container: archlinux@sha256:ece6c971fec3c532fd508bce299a446deaf469feecbfe7c353e995bc1a5e7bba
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: install Hyprland 0.56.2 from the Arch archive
+        run: |
+          echo 'Server = https://archive.archlinux.org/repos/2026/10/20/$repo/os/$arch' >/etc/pacman.d/mirrorlist
+          pacman -Syyuu --noconfirm --needed gcc pkgconf hyprland
+          pkg-config --modversion hyprland
+
+      - name: compile the plugin
+        run: native/build /tmp/crt-pass.so

@@ -32,11 +32,14 @@ owner() { # extra arg
 }
 echo "== drag and drop"; seat "HEADLESS-1 1600x900@60 1 0 0 0"
 timeout 70 "$here/rig/prove-drag" "$S" "$S/drag" 2>&1 | sed 's/^/    /' ; [[ ${PIPESTATUS[0]} -eq 0 ]] || bad=$((bad + 1))
+echo "== special workspaces, groups, pins, hotplug, X11, pointer lock"; seat "HEADLESS-1 1600x900@60 1 0 0 0"
+timeout 120 "$here/rig/prove-cases" "$S" "$S/cases" 2>&1 | sed 's/^/    /' ; [[ ${PIPESTATUS[0]} -eq 0 ]] || bad=$((bad + 1))
 echo "== edges, on the laptop panel"; seat "HEADLESS-1 2560x1600@60 1.6 0 0 0"
 printf 'TUBE_K1 0.137\nTUBE_K2 0.058\nANIMATED 0\nON 1\n' >"$S/home/knobs.txt"
 timeout 80 "$here/rig/prove-edges" "$S" "$S/edges" 2>&1 | sed 's/^/    /' ; [[ ${PIPESTATUS[0]} -eq 0 ]] || bad=$((bad+1))
 echo "== owner"; owner
 echo "== owner, plugin built for another Hyprland"; owner refused
+echo "== owner, a hook that fails partway through loading"; owner hookfail
 pkill -f "[v]ptr $S" 2>/dev/null; pkill -f "^[H]yprland --config" 2>/dev/null
 echo "failed proofs: $bad"
 exit $bad

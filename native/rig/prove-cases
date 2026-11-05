@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""The layouts the other proofs never reach.  prove-cases <state-dir> <out-dir>
+
+Special workspaces, groups, pinned windows, a monitor plugged in and pulled, an
+XWayland window, and a client that locks the pointer. For each, a real click at
+the place a target appears must land on that target, and Hyprland must still be up.
+"""
+import json, os, re, subprocess, sys, time
+S, OUT = sys.argv[1], sys.argv[2]
+HOME = S + "/home"; FIFO = HOME + "/vptr.fifo"; BW = 2
+knobs = dict(l.split()[:2] for l in open(HOME + "/knobs.txt") if l.strip())
+K1, K2 = float(knobs.get("TUBE_K1", 0.137)), float(knobs.get("TUBE_K2", 0.058))
+os.makedirs(OUT, exist_ok=True)
+fails = 0
+def verdict(ok, text):
+    global fails
+    fails += 0 if ok else 1
+    print(f"  {'ok  ' if ok else 'FAIL'} {text}", flush=True)
+def inn(*a):
+    return subprocess.run([S + "/in", *a], capture_output=True, text=True, timeout=30)
+def dispatch(lua):
+    r = inn("hyprctl", "dispatch", lua).stdout.strip()
+    if r != "ok": print("  dispatch:", lua, "->", r[:90], flush=True)
+    time.sleep(.5)
+def spawn(args, log):
+    return subprocess.Popen([S + "/in", *args], stdout=open(log, "w"), stderr=subprocess.STDOUT, start_new_session=True)
+def client(name):
+    return spawn(["env", "QT_QPA_PLATFORM=wayland", "QS_NO_RELOAD_POPUP=1", "QT_FORCE_STDERR_LOGGING=1", "quickshell", "-p", f"{HOME}/client/{name}.qml"], f"{HOME}/{name}.log")
+def stop(name):
+    subprocess.run(["pkill", "-f", f"[q]uickshell -p {HOME}/client/{name}.qml"]); time.sleep(.6)
+def clients():
+    return json.loads(inn("hyprctl", "clients", "-j").stdout)
+def wait(pred, secs=15):
+    for _ in range(int(secs * 4)):
+        if pred(): return True
+        time.sleep(.25)
+    return False
+def by(title):
+    return next((c for c in clients() if c["title"] == title), None)
+def send(line):
+    with open(FIFO, "w") as f: f.write(line + "\n")
+def warp(l):
+    c = (l[0] - .5, l[1] - .5); r2 = c[0]**2 + c[1]**2; k = 1 + K1*r2 + K2*r2*r2
+    return (.5 + c[0]*k, .5 + c[1]*k)
+def unwarp(src):
+    p = list(src)
+    for _ in range(60):
+        w = warp(p); p[0] += src[0] - w[0]; p[1] += src[1] - w[1]
+    return p
+def clicks(name, who):
+    return re.findall(rf"CLICK {who} (-?[\d.]+) (-?[\d.]+)", open(f"{HOME}/{name}.log", errors="replace").read())
+def miss(c, name, who, frac=(.07, .105)):
+    """Click where a target near a corner of window c appears; how far off did it land?"""
+    ww, wh = c["size"]; W, H = ww + 2*BW, wh + 2*BW
+    X, Y = c["at"][0] - BW, c["at"][1] - BW
+    tx, ty = frac[0]*ww, frac[1]*wh
+    lx, ly = unwarp(((tx + BW) / W, (ty + BW) / H))
+    n = len(clicks(name, who))
+    # A nudge first, as a hand gives. Hyprland itself drops a click on a window that
+    # appeared under a pointer that has not moved, with or without this pass.
+    send(f"move {round(X + lx*W) + 3} {round(Y + ly*H)}"); time.sleep(.1)
+    send(f"move {round(X + lx*W)} {round(Y + ly*H)}"); time.sleep(.2); send("click")
+    for _ in range(40):
+        got = clicks(name, who)
+        if len(got) > n: return ((float(got[-1][0]) - tx)**2 + (float(got[-1][1]) - ty)**2) ** .5
+        time.sleep(.05)
+    return None
+def pointer(w, h):
+    """Absolute motion is a fraction of the whole layout, so a new monitor needs a new one."""
+    subprocess.run(["pkill", "-f", f"[v]ptr {FIFO}"]); time.sleep(.2)
+    try: os.unlink(FIFO)
+    except OSError: pass
+    spawn([HOME + "/vptr", FIFO, str(w), str(h)], HOME + "/vptr.log")
+    wait(lambda: os.path.exists(FIFO))
+def layout():
+    ms = json.loads(inn("hyprctl", "monitors", "-j").stdout)
+    return max(m["x"] + m["width"] for m in ms), max(m["y"] + m["height"] for m in ms)
+def alive():
+    return inn("hyprctl", "version").returncode == 0
+def report(label, m):
+    verdict(m is not None and m <= 3, f"{label}: {'no click' if m is None else f'{m:.1f} px'}")
+
+open(HOME + "/keep-drawing", "w").close()
+pointer(1600, 900)
+
+client("target"); wait(lambda: by("grid")); time.sleep(1.2)
+report("a tile takes a click, as a baseline", miss(by("grid"), "target", "tile"))
+
+dispatch('hl.dsp.window.move({ workspace = "special:crt", follow = false })')
+dispatch('hl.dsp.workspace.toggle_special("crt")')
+c = by("grid")
+verdict(c and c["workspace"]["name"].startswith("special"), f"the tile is on a special workspace: {c and c['workspace']['name']}")
+report("a window on a special workspace", miss(c, "target", "tile"))
+dispatch('hl.dsp.workspace.toggle_special("crt")')
+dispatch('hl.dsp.focus({ workspace = "1" })')
+dispatch('hl.dsp.workspace.toggle_special("crt")')
+dispatch('hl.dsp.window.move({ workspace = "1" })')
+wait(lambda: by("grid") and by("grid")["workspace"]["id"] == 1, 4)
+dispatch('hl.dsp.focus({ workspace = "1" })')
+
+spawn(["env", "QT_QPA_PLATFORM=wayland", "QS_NO_RELOAD_POPUP=1", "QT_FORCE_STDERR_LOGGING=1", "quickshell", "-p", f"{HOME}/client/target.qml"], f"{HOME}/target2.log")
+wait(lambda: len(clients()) >= 2); time.sleep(1)
+dispatch('hl.dsp.group.toggle()')
+dispatch('hl.dsp.focus({ direction = "l" })')
+dispatch('hl.dsp.window.move({ into_group = "r" })')
+time.sleep(1)
+grouped = [c for c in clients() if len(c.get("grouped", [])) >= 2]
+verdict(len(grouped) >= 2, f"two windows share a group: {len(grouped)}")
+if grouped:
+    active = next(c for c in grouped if c["address"] == json.loads(inn("hyprctl", "activewindow", "-j").stdout)["address"])
+    a, b = len(clicks("target", "tile")), len(clicks("target2", "tile"))
+    m1 = miss(active, "target", "tile")
+    name = "target" if m1 is not None else "target2"
+    m = m1 if m1 is not None else (lambda g: None if not g else ((float(g[-1][0]) - .07*active["size"][0])**2 + (float(g[-1][1]) - .105*active["size"][1])**2) ** .5)(clicks("target2", "tile")[b:])
+    report("the visible window of a group", m)
+stop("target"); client("float"); wait(lambda: by("float")); time.sleep(1.2)
+dispatch('hl.dsp.window.pin()')
+verdict(by("float")["pinned"], "a float is pinned")
+dispatch('hl.dsp.focus({ workspace = "2" })'); time.sleep(.8)
+report("a pinned float on another workspace", miss(by("float"), "float", "float"))
+dispatch('hl.dsp.window.pin()')
+dispatch('hl.dsp.focus({ workspace = "1" })')
+stop("float")
+
+client("target"); wait(lambda: by("grid")); time.sleep(1.2)
+inn("hyprctl", "output", "create", "headless", "CRT-HOT"); time.sleep(1.5)
+mons = json.loads(inn("hyprctl", "monitors", "-j").stdout)
+pointer(*layout())
+verdict(any(m["name"] == "CRT-HOT" for m in mons), f"a monitor plugged in: {[m['name'] for m in mons]}")
+report("a click after the plug", miss(by("grid"), "target", "tile"))
+inn("hyprctl", "output", "remove", "CRT-HOT"); time.sleep(1.5)
+verdict(alive() and not any(m["name"] == "CRT-HOT" for m in json.loads(inn("hyprctl", "monitors", "-j").stdout)), "and pulled, with Hyprland still up")
+pointer(*layout())
+report("a click after the pull", miss(by("grid"), "target", "tile"))
+stop("target")
+
+# Through Hyprland, so the client gets the seat's own DISPLAY and its own /tmp.
+dispatch(f'hl.dsp.exec_cmd("sh -c \'QT_QPA_PLATFORM=xcb QT_FORCE_STDERR_LOGGING=1 quickshell -p {HOME}/client/x11.qml >{HOME}/x11.log 2>&1\'")')
+ok = wait(lambda: by("x11grid"), 12)
+verdict(ok, "an XWayland window opens in the seat")
+if ok:
+    time.sleep(1.2); c = by("x11grid")
+    verdict(c["xwayland"], "and really is X11")
+    report("an XWayland window", miss(c, "x11", "x11"))
+    dispatch('hl.dsp.window.close({ window = "title:x11grid" })')
+    subprocess.run(["pkill", "-f", "[q]uickshell -p .*x11.qml"]); time.sleep(.5)
+
+spawn([HOME + "/locker"], HOME + "/locker.log")
+wait(lambda: by("locker")); time.sleep(1)
+c = by("locker")
+cx, cy = c["at"][0] + c["size"][0]//2, c["at"][1] + c["size"][1]//2
+send(f"move {cx} {cy}"); time.sleep(.3); send("click"); time.sleep(.5)
+def log(): return open(HOME + "/locker.log", errors="replace").read()
+verdict("LOCKED" in log(), "a client locks the pointer")
+before = json.loads(inn("hyprctl", "cursorpos", "-j").stdout)
+for i in range(4):
+    send("rel 8 5"); time.sleep(.08)
+time.sleep(.3)
+after = json.loads(inn("hyprctl", "cursorpos", "-j").stdout)
+rels = re.findall(r"REL (-?[\d.]+) (-?[\d.]+)", log())
+verdict(rels and alive(), f"it gets relative motion and Hyprland stays up: {len(rels)} events")
+verdict(before == after, f"and the locked pointer stays put: {before} -> {after}")
+subprocess.run(["pkill", "-f", "[h]ome/locker$"]); time.sleep(.3)
+print("FAILED" if fails else "PROVED", flush=True)
+sys.exit(1 if fails else 0)

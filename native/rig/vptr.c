@@ -39,8 +39,12 @@ int main(int argc, char** argv) {
         FILE* f = fopen(argv[1], "r");
         while (f && fgets(line, sizeof line, f)) {
             unsigned x, y;
+            int      dx, dy;
             if (sscanf(line, "move %u %u", &x, &y) == 2) {
                 zwlr_virtual_pointer_v1_motion_absolute(p, now(), x, y, ew, eh);
+                zwlr_virtual_pointer_v1_frame(p);
+            } else if (sscanf(line, "rel %d %d", &dx, &dy) == 2) {
+                zwlr_virtual_pointer_v1_motion(p, now(), wl_fixed_from_int(dx), wl_fixed_from_int(dy));
                 zwlr_virtual_pointer_v1_frame(p);
             } else if (!strncmp(line, "press", 5) || !strncmp(line, "release", 7)) {
                 zwlr_virtual_pointer_v1_button(p, now(), BTN_LEFT, line[0] == 'p');

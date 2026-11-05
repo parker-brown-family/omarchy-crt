@@ -16,6 +16,32 @@ struct SKnob {
     int         loc      = -1;
 };
 
+struct SPoint {
+    double x = 0, y = 0;
+};
+
+// Where the shader gathers for a point in a tube: the pointer has to land there too.
+// Past the tube's edge the correction stops growing and carries on at its edge value.
+// It is quartic in the distance from the centre, and a press held far from a small
+// window would otherwise throw the position a whole screen away.
+inline SPoint lensThrough(SPoint pos, SPoint size, SPoint p, double k1, double k2, bool clamp) {
+    const SPoint in = {std::clamp(p.x, pos.x, pos.x + size.x), std::clamp(p.y, pos.y, pos.y + size.y)};
+    const SPoint c  = {(in.x - pos.x) / size.x - 0.5, (in.y - pos.y) / size.y - 0.5};
+    const double r2 = c.x * c.x + c.y * c.y, k = 1.0 + k1 * r2 + k2 * r2 * r2;
+    SPoint       w  = {0.5 + c.x * k, 0.5 + c.y * k};
+    if (clamp)
+        w = {std::clamp(w.x, 0.0, 0.999), std::clamp(w.y, 0.0, 0.999)};
+    return {p.x + pos.x + w.x * size.x - in.x, p.y + pos.y + w.y * size.y - in.y};
+}
+
+// A press belongs to whatever it landed on until the button comes up. Without this a
+// drag from a tile jumps by the whole correction as it crosses a flat toast. Drag and
+// drop is the exception: the button is held, but the pointer now speaks to whatever is
+// under it, so each drop target is mapped through its own tube.
+inline bool pressHolds(bool held, bool dragAndDrop) {
+    return held && !dragAndDrop;
+}
+
 // knobs.txt, one setting per line. A line that will not parse is skipped alone, so a
 // value too large for a float cannot hide the ON or PASS lines after it.
 inline void parseKnobs(std::istream& f, std::vector<SKnob>& knobs, std::vector<std::string>& pass, bool& animated, bool& on) {

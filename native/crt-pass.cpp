@@ -375,23 +375,11 @@ static SP<CWLSurfaceResource> hkLayerAt(void* self, const Vector2D& pos, std::ve
     return ((origLayerAt)g_layerHook->m_original)(self, pos, layers, coords, found, lock);
 }
 
-// Past a tube's edge the correction stops growing and carries on at its edge value. It
-// is quartic in the distance from the centre, and a press held far from a small window
-// would otherwise throw the position a whole screen away.
 static Vector2D through(const CBox& box, const Vector2D& p, bool clamp) {
-    const Vector2D in = {std::clamp(p.x, box.x, box.x + box.w), std::clamp(p.y, box.y, box.y + box.h)};
-    const auto   c  = (in - box.pos()) / box.size() - Vector2D{0.5, 0.5};
-    const double r2 = c.x * c.x + c.y * c.y, k = 1.0 + knob("TUBE_K1", 0) * r2 + knob("TUBE_K2", 0) * r2 * r2;
-    Vector2D     w  = Vector2D{0.5, 0.5} + c * k;
-    if (clamp)
-        w = {std::clamp(w.x, 0.0, 0.999), std::clamp(w.y, 0.0, 0.999)};
-    return p + box.pos() + w * box.size() - in;
+    const auto o = lensThrough({box.x, box.y}, {box.w, box.h}, {p.x, p.y}, knob("TUBE_K1", 0), knob("TUBE_K2", 0), clamp);
+    return {o.x, o.y};
 }
 
-// A press belongs to whatever it landed on until the button comes up. Without this a
-// drag from a tile jumps by the whole correction as it crosses a flat toast. Drag and
-// drop is the exception: the button is held, but the pointer now speaks to whatever is
-// under it, so each drop target is mapped through its own tube.
 static std::optional<CBox> g_pressTube;
 
 static std::optional<Vector2D> mapped(const Vector2D& p) {
@@ -403,7 +391,7 @@ static std::optional<Vector2D> mapped(const Vector2D& p) {
         g_pressTube.reset();
         return std::nullopt;
     }
-    if (!g_pInputManager->m_currentlyHeldButtons.empty() && !PROTO::data->dndActive())
+    if (pressHolds(!g_pInputManager->m_currentlyHeldButtons.empty(), PROTO::data->dndActive()))
         return g_pressTube ? std::optional{through(*g_pressTube, p, false)} : std::nullopt;
     g_pressTube.reset();
     for (auto const& m : State::monitorState()->monitors()) {
@@ -458,6 +446,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         throw std::runtime_error("crt-pass: built for another Hyprland, rebuild with native/build");
     g_positionHook = hookNamed("position", "CPointerManager::position", (void*)hkPosition);
     g_layerHook    = hookNamed("layerSurfaceAt", "CViewHitTester::layerSurfaceAt", (void*)hkLayerAt);
+#ifdef CRT_FAIL_HOOK
+    throw std::runtime_error("crt-pass: a hook failed partway, on purpose");
+#endif
     g_moveHook     = hookNamed("mouseMoveUnified", "CInputManager::mouseMoveUnified", (void*)hkMove);
     // Before anything draws, so the knob list exists when knobs.txt is first read.
     // Hyprland keeps an unloaded plugin mapped, so a second load of one build finds these

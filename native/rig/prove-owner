@@ -61,6 +61,26 @@ if len(sys.argv) > 3 and sys.argv[3] == "refused":
     verdict("crt-glass" in (shader() or ""), "and today's shader is bound")
     print("FAILED" if fails else "PROVED", flush=True)
     sys.exit(1 if fails else 0)
+# A hook that fails after others went in, which leaves live detours into a plugin that
+# Hyprland is about to drop. Moving the pointer afterwards runs those paths for real.
+if len(sys.argv) > 3 and sys.argv[3] == "hookfail":
+    subprocess.run([HERE + "/../build", NAT + "/crt-pass.so", "-DCRT_RIG", "-DCRT_FAIL_HOOK"], capture_output=True)
+    code, out = crt("native", "on")
+    verdict(code != 0 and not plugins(), f"a plugin that fails partway is refused, exit {code}")
+    verdict(not os.path.exists(S + "/run/omarchy-crt-native"), "and leaves no flag behind")
+    verdict("crt-glass" in (shader() or ""), "and today's shader is bound")
+    fifo = HOME + "/vptr.fifo"
+    subprocess.Popen([S + "/in", HOME + "/vptr", fifo, "1600", "900"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    for _ in range(40):
+        if os.path.exists(fifo): break
+        time.sleep(.1)
+    for x in range(200, 1400, 100):
+        with open(fifo, "w") as f: f.write(f"move {x} 450\n")
+        time.sleep(.03)
+    time.sleep(.3)
+    verdict(plugins() is False and inn("hyprctl", "version").returncode == 0, "and the pointer still moves with Hyprland alive")
+    print("FAILED" if fails else "PROVED", flush=True)
+    sys.exit(1 if fails else 0)
 open(HOME + "/keep-drawing", "w").close()
 subprocess.Popen([S + "/in", "env", "QT_QPA_PLATFORM=wayland", "QS_NO_RELOAD_POPUP=1", "quickshell", "-p", f"{HOME}/client/target.qml"],
                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
